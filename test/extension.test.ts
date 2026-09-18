@@ -20,8 +20,12 @@ type HelmCommand = {
 type Notice = { message: string; level: string };
 type FakeModel = { provider: string; id: string };
 type HarnessOptions = {
+  appliedModels?: Record<string, FakeModel[]>;
   unavailableModels?: string[];
   modelResults?: Record<string, boolean[]>;
+  mutateModelBeforeFailure?: string[];
+  registryErrors?: string[];
+  registryResults?: Record<string, FakeModel | null>;
   scopedModels?: string[];
   thinkingLevelByModel?: Record<string, string>;
 };
@@ -55,6 +59,11 @@ function createHarness(
     })),
     modelRegistry: {
       find(provider: string, id: string) {
+        const key = `${provider}/${id}`;
+        if (options.registryErrors?.includes(key)) throw new Error("registry failed");
+        if (Object.hasOwn(options.registryResults ?? {}, key)) {
+          return options.registryResults?.[key] ?? undefined;
+        }
         return models.find((model) => model.provider === provider && model.id === id);
       },
       async getApiKeyForProvider(provider: string) {
@@ -82,8 +91,11 @@ function createHarness(
       const key = modelKey(model);
       modelChanges.push(key);
       const configuredResult = options.modelResults?.[key]?.shift();
-      if (configuredResult === false || options.unavailableModels?.includes(key)) return false;
-      contextValue.model = model;
+      if (configuredResult === false || options.unavailableModels?.includes(key)) {
+        if (options.mutateModelBeforeFailure?.includes(key)) contextValue.model = model;
+        return false;
+      }
+      contextValue.model = options.appliedModels?.[key]?.shift() ?? model;
       return true;
     },
     getThinkingLevel() {
@@ -373,9 +385,33 @@ describe("Pi Jev Helm extension", () => {
     await harness.emit("before_agent_start", { prompt: "first attempt" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
 
-    expect(harness.modelChanges).toEqual(["anthropic/coding/model"]);
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
     expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
     expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+  });
+
+  it("compensates a model mutation reported as failed before the request continues", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      modelResults: { "anthropic/coding/model": [false] },
+      mutateModelBeforeFailure: ["anthropic/coding/model"],
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "first request" });
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.thinkingLevelChanges).toEqual(["medium"]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("medium");
   });
 
   it("retries a failed settlement restoration before the next independent request", async () => {
@@ -394,6 +430,32 @@ describe("Pi Jev Helm extension", () => {
     });
 
     await harness.emit("before_agent_start", { prompt: "next independent request" });
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("medium");
+  });
+
+  it("retries restoration when Pi reports success without restoring the exact Baseline Model", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      appliedModels: {
+        "baseline-provider/baseline-model": [
+          { provider: "baseline-provider", id: "baseline-model-latest" },
+          { provider: "baseline-provider", id: "baseline-model" },
+        ],
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "routed run" });
+
+    await harness.emit("agent_settled");
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
     expect(harness.modelChanges).toEqual([
       "anthropic/coding/model",
       "baseline-provider/baseline-model",
@@ -432,6 +494,81 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.thinkingLevelChanges).toEqual(["high", "medium"]);
     expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
     expect(harness.thinkingLevel).toBe("medium");
+  });
+
+  it("attempts to restore the Baseline Model and thinking level before retrying on the next Routed Run", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      modelResults: { "baseline-provider/baseline-model": [false, true] },
+      thinkingLevelByModel: { "anthropic/coding/model": "off" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "partial application" });
+    expect(harness.thinkingLevelChanges).toEqual(["high", "medium"]);
+
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.thinkingLevelChanges).toEqual(["high", "medium", "medium"]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("medium");
+  });
+
+  it("rejects a non-exact model registry result without contaminating the next run", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      registryResults: {
+        "anthropic/coding/model": { provider: "anthropic", id: "coding/model-latest" },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "first request" });
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+  });
+
+  it("fails open when exact Route Target resolution throws", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", { registryErrors: ["anthropic/coding/model"] });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await expect(harness.emit("before_agent_start", { prompt: "keep working" })).resolves.toBeUndefined();
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+  });
+
+  it("compensates when model application reports success for a different model", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      appliedModels: {
+        "anthropic/coding/model": [{ provider: "anthropic", id: "coding/model-latest" }],
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "keep working" });
+
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.thinkingLevelChanges).toEqual(["medium"]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
   });
 
   it("rejects a Route Target outside the current scoped models", async () => {
