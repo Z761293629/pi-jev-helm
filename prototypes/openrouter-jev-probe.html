@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE — OpenRouter Jev contract probe</title>
+  <style>
+    :root { --ink:#17201d; --muted:#62706b; --paper:#f7f5ef; --panel:#fff; --line:#d7ddd8; --accent:#146c5a; --bad:#a43d36; --good:#217a58; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(1100px,calc(100% - 32px)); margin:36px auto 72px; }
+    h1,h2,h3 { line-height:1.15; }
+    h1 { margin-bottom:8px; }
+    h2 { margin-top:36px; }
+    .eyebrow { color:var(--accent); font-size:12px; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+    .intro,.notice { max-width:820px; color:var(--muted); }
+    .notice { padding:12px 14px; border-left:4px solid var(--accent); background:#edf5f2; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px; margin:14px 0; }
+    .credentials { display:grid; grid-template-columns:minmax(220px,1fr) auto; gap:10px; align-items:end; }
+    label { display:block; color:var(--muted); font-size:13px; font-weight:700; }
+    input { width:100%; margin-top:5px; padding:10px 12px; border:1px solid var(--line); border-radius:7px; font:inherit; }
+    button { border:1px solid var(--accent); border-radius:7px; padding:9px 13px; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; }
+    button.secondary { background:#fff; color:var(--accent); }
+    button:disabled { cursor:not-allowed; opacity:.45; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; }
+    .stats { display:grid; grid-template-columns:repeat(5,minmax(90px,1fr)); gap:10px; }
+    .stat { padding:12px; border:1px solid var(--line); border-radius:8px; }
+    .stat strong { display:block; font-size:23px; }
+    .stat span { color:var(--muted); font-size:12px; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:9px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--muted); font-size:12px; }
+    .good { color:var(--good); font-weight:800; }
+    .bad { color:var(--bad); font-weight:800; }
+    .muted { color:var(--muted); }
+    pre { max-height:420px; overflow:auto; padding:14px; border-radius:8px; background:#12201c; color:#dcebe5; font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-word; }
+    .tabs { display:flex; gap:7px; flex-wrap:wrap; margin-bottom:12px; }
+    .tabs button[aria-selected="true"] { background:var(--accent); color:#fff; }
+    .tabs button { background:#fff; color:var(--accent); }
+    .steps { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+    .steps button.done { background:#fff; color:var(--good); border-color:var(--good); }
+    @media (max-width:760px) { .credentials,.stats { grid-template-columns:1fr; } table { display:block; overflow-x:auto; } }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Throwaway prototype · synthetic data only</div>
+  <h1>OpenRouter Jev 真实合同探针</h1>
+  <p class="intro"><strong>要回答的问题：</strong>真实的 OpenRouter Jev 请求与响应能否被稳定解析？固定模型、滚动别名、结构化 guidance 与无效输入各自表现如何，延迟和主要失败模式是什么？</p>
+  <p class="notice">此页面直接调用 <code>POST https://openrouter.ai/api/alpha/decisions</code>。API key 只保存在当前页面内存，不写入存储，也不会出现在导出结果中。所有 state 都是合成文本。每次点击可能产生少量 OpenRouter 费用。</p>
+
+  <section class="panel credentials">
+    <label>临时 OpenRouter API key
+      <input id="apiKey" type="password" autocomplete="off" placeholder="sk-or-v1-…">
+    </label>
+    <button id="clearKey" class="secondary">清除 key</button>
+  </section>
+
+  <h2>当前状态</h2>
+  <section class="panel stats" id="stats"></section>
+  <section class="panel">
+    <div class="actions">
+      <button id="export" class="secondary">导出脱敏 JSON</button>
+      <button id="reset" class="secondary">清空结果</button>
+    </div>
+    <div id="results"></div>
+  </section>
+
+  <h2>自由探测</h2>
+  <section class="panel">
+    <p class="muted">单次点击只发送一个请求；“重复 5 次”串行执行，便于观察解析稳定性与延迟分布。</p>
+    <div class="actions" id="freePlay"></div>
+  </section>
+
+  <h2>引导流程</h2>
+  <section class="panel">
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <div id="walkthrough"></div>
+  </section>
+
+  <h2>最近一次原始结果</h2>
+  <section class="panel">
+    <p id="latestTitle" class="muted">尚未运行探针。</p>
+    <pre id="raw">{}</pre>
+  </section>
+</main>
+<script>
+// Portable probe model: payload definitions, response checks, and pure state transitions.
+const ProbeModel = (() => {
+  const questionSet = {
+    urgent: { type: "noul", instructions: "Does the request describe an urgent problem?", criteria: { true: "Time-sensitive harm is explicit", false: "No urgency is explicit" } },
+    task_kind: { type: "choice", instructions: "Which capability best fits the request?", criteria: { coding: "Change or inspect code", research: "Gather external facts", simple: "Answer directly without tools" } },
+    complexity: { type: "score", instructions: "How much reasoning is required?", criteria: ["Trivial", "Normal", "Hard"] }
+  };
+  const baseState = "The build fails only in CI after a dependency update. Diagnose the cause and propose a code fix.";
+  const probes = {
+    fixed: { title:"固定模型 · 三原语", expected:"success", payload:{ model:"typesafe/jev-1.13", state:baseState, questions:questionSet, provider:{ zdr:true } } },
+    alias: { title:"滚动别名 · 三原语", expected:"success", payload:{ model:"~typesafe/jev-latest", state:baseState, questions:questionSet, provider:{ zdr:true } } },
+    structured: { title:"结构化 guidance", expected:"success", payload:{ model:"typesafe/jev-1.13", state:{ request:baseState, environment:{ repository:"synthetic", language:"TypeScript" } }, questions:{ task_kind:{ type:"choice", instructions:{ goal:"Classify the primary capability", rule:"Choose exactly one" }, criteria:{ coding:{ includes:["debugging","editing"] }, research:{ includes:["external facts"] }, simple:null } } }, provider:{ zdr:true } } },
+    invalidScore: { title:"无效输入 · Score 单档", expected:"failure", payload:{ model:"typesafe/jev-1.13", state:baseState, questions:{ complexity:{ type:"score", instructions:"Rate complexity", criteria:["Only one level"] } }, provider:{ zdr:true } } },
+    empty: { title:"无效输入 · 空 questions", expected:"failure", payload:{ model:"typesafe/jev-1.13", state:baseState, questions:{}, provider:{ zdr:true } } }
+  };
+  const initialState = () => ({ running:false, runs:[], walkthrough:"minimum", completedSteps:{} });
+  function reducer(state, action) {
+    if (action.type === "START") return { ...state, running:true };
+    if (action.type === "FINISH") return { ...state, running:false, runs:[...state.runs, action.run] };
+    if (action.type === "RESET") return initialState();
+    if (action.type === "TAB") return { ...state, walkthrough:action.id };
+    if (action.type === "STEP_DONE") return { ...state, completedSteps:{ ...state.completedSteps, [action.id]:true } };
+    return state;
+  }
+  function validate(body, probe) {
+    const failures = [];
+    if (!body || typeof body !== "object") return ["body is not an object"];
+    if (!body.answers || typeof body.answers !== "object") failures.push("answers missing or not an object");
+    if (!body.usage || typeof body.usage !== "object") failures.push("usage missing or not an object");
+    const expectedKeys = Object.keys(probe.payload.questions);
+    if (body.answers) {
+      const actualKeys = Object.keys(body.answers);
+      for (const key of expectedKeys) if (!actualKeys.includes(key)) failures.push(`answer missing: ${key}`);
+      for (const key of actualKeys) {
+        const answer = body.answers[key];
+        if (!answer || !["noul","choice","score"].includes(answer.type)) failures.push(`invalid answer type: ${key}`);
+      }
+    }
+    return failures;
+  }
+  return { probes, initialState, reducer, validate };
+})();
+
+const API_URL = "https://openrouter.ai/api/alpha/decisions";
+const state = { current: ProbeModel.initialState() };
+const walkthroughs = {
+  minimum: { title:"最小可用链路", description:"确认固定模型能返回三个同批原语，并连续重复观察解析成功率和延迟。", steps:["fixed","repeat"] },
+  drift: { title:"合同漂移", description:"比较固定模型、滚动别名和结构化 guidance，观察 model、provider 与可选字段。", steps:["fixed","alias","structured"] },
+  failures: { title:"失败语义", description:"发送两个无效 schema，记录状态码、错误 envelope 与是否意外成功。", steps:["invalidScore","empty"] }
+};
+
+function dispatch(action) { state.current = ProbeModel.reducer(state.current, action); render(); }
+function key() { return document.querySelector("#apiKey").value.trim(); }
+function percentile(values, p) {
+  if (!values.length) return "—";
+  const sorted = [...values].sort((a,b)=>a-b);
+  return Math.round(sorted[Math.ceil((sorted.length - 1) * p)]);
+}
+function summary() {
+  const runs = state.current.runs;
+  const successRuns = runs.filter(r => r.expected === "success");
+  return {
+    requests:runs.length,
+    httpSuccess:runs.filter(r => r.status >= 200 && r.status < 300).length,
+    parsed:successRuns.filter(r => r.status >= 200 && r.status < 300 && r.validation.length === 0).length,
+    expectedSuccess:successRuns.length,
+    p50:percentile(runs.map(r=>r.latencyMs),.5),
+    p95:percentile(runs.map(r=>r.latencyMs),.95)
+  };
+}
+async function execute(id, stepId) {
+  if (!key()) { alert("请先输入临时 OpenRouter API key。不要把 key 发到聊天或提交到仓库。"); return; }
+  const probe = ProbeModel.probes[id];
+  dispatch({type:"START"});
+  const started = performance.now();
+  let status = 0, body = null, responseHeaders = {}, transportError = null;
+  try {
+    const response = await fetch(API_URL, {
+      method:"POST",
+      headers:{ "Authorization":`Bearer ${key()}`, "Content-Type":"application/json", "X-OpenRouter-Title":"pi-jev-helm throwaway probe" },
+      body:JSON.stringify(probe.payload)
+    });
+    status = response.status;
+    for (const name of ["retry-after","x-ratelimit-limit","x-ratelimit-remaining","x-ratelimit-reset"]) {
+      const value = response.headers.get(name); if (value) responseHeaders[name] = value;
+    }
+    const text = await response.text();
+    try { body = JSON.parse(text); } catch { body = { unparsedText:text }; }
+  } catch (error) {
+    transportError = String(error && error.message ? error.message : error);
+  }
+  const latencyMs = Math.round(performance.now() - started);
+  const validation = status >= 200 && status < 300 && probe.expected === "success" ? ProbeModel.validate(body, probe) : [];
+  const run = { id, title:probe.title, expected:probe.expected, requestedModel:probe.payload.model, status, latencyMs, responseHeaders, validation, transportError, request:probe.payload, response:body };
+  dispatch({type:"FINISH", run});
+  if (stepId) dispatch({type:"STEP_DONE", id:stepId});
+}
+async function repeatFixed(stepId) {
+  for (let i=0;i<5;i++) await execute("fixed");
+  if (stepId) dispatch({type:"STEP_DONE", id:stepId});
+}
+function runAction(id, stepId) { return id === "repeat" ? repeatFixed(stepId) : execute(id, stepId); }
+
+function render() {
+  const s = summary();
+  document.querySelector("#stats").innerHTML = [
+    [s.requests,"请求"], [`${s.parsed}/${s.expectedSuccess}`,"成功路径解析"], [s.httpSuccess,"HTTP 2xx"], [s.p50 === "—" ? "—" : `${s.p50} ms`,"延迟 p50"], [s.p95 === "—" ? "—" : `${s.p95} ms`,"延迟 p95"]
+  ].map(([v,l])=>`<div class="stat"><strong>${v}</strong><span>${l}</span></div>`).join("");
+  document.querySelector("#results").innerHTML = state.current.runs.length ? `<table><thead><tr><th>#</th><th>探针</th><th>预期</th><th>HTTP</th><th>延迟</th><th>解析</th><th>响应 model / provider</th></tr></thead><tbody>${state.current.runs.map((r,i)=>`<tr><td>${i+1}</td><td>${escapeHtml(r.title)}</td><td>${r.expected}</td><td class="${r.status>=200&&r.status<300?'good':'bad'}">${r.status||'transport'}</td><td>${r.latencyMs} ms</td><td>${r.transportError?escapeHtml(r.transportError):(r.validation.length?`<span class="bad">${escapeHtml(r.validation.join('; '))}</span>`:'<span class="good">shape OK</span>')}</td><td>${escapeHtml(`${r.response?.model || '—'} / ${r.response?.provider || '—'}`)}</td></tr>`).join("")}</tbody></table>` : '<p class="muted">尚无结果。</p>';
+  const actions = ["fixed","alias","structured","invalidScore","empty","repeat"];
+  const labels = {...Object.fromEntries(Object.entries(ProbeModel.probes).map(([k,v])=>[k,v.title])),repeat:"固定模型 · 重复 5 次"};
+  document.querySelector("#freePlay").innerHTML = actions.map(id=>`<button data-run="${id}" ${state.current.running?'disabled':''}>${labels[id]}</button>`).join("");
+  document.querySelector("#tabs").innerHTML = Object.entries(walkthroughs).map(([id,w])=>`<button data-tab="${id}" aria-selected="${state.current.walkthrough===id}">${w.title}</button>`).join("");
+  const w = walkthroughs[state.current.walkthrough];
+  document.querySelector("#walkthrough").innerHTML = `<h3>${w.title}</h3><p>${w.description}</p><div class="steps">${w.steps.map((id,i)=>{const stepId=`${state.current.walkthrough}:${i}`;return `<button data-step="${id}" data-step-id="${stepId}" class="${state.current.completedSteps[stepId]?'done':''}" ${state.current.running?'disabled':''}>${i+1}. ${labels[id]}</button>`}).join("")}</div>`;
+  const latest = state.current.runs.at(-1);
+  document.querySelector("#latestTitle").textContent = latest ? `${latest.title} · HTTP ${latest.status || "transport error"} · ${latest.latencyMs} ms` : "尚未运行探针。";
+  document.querySelector("#raw").textContent = JSON.stringify(latest || {}, null, 2);
+  document.querySelectorAll("[data-run]").forEach(b=>b.onclick=()=>runAction(b.dataset.run));
+  document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>dispatch({type:"TAB",id:b.dataset.tab}));
+  document.querySelectorAll("[data-step]").forEach(b=>b.onclick=()=>runAction(b.dataset.step,b.dataset.stepId));
+}
+function escapeHtml(value) { return String(value).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"})[c]); }
+document.querySelector("#clearKey").onclick = () => { document.querySelector("#apiKey").value=""; };
+document.querySelector("#reset").onclick = () => dispatch({type:"RESET"});
+document.querySelector("#export").onclick = () => {
+  const blob = new Blob([JSON.stringify({ exportedAt:new Date().toISOString(), endpoint:API_URL, summary:summary(), runs:state.current.runs },null,2)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="openrouter-jev-probe-results.json"; a.click(); URL.revokeObjectURL(a.href);
+};
+render();
+</script>
+</body>
+</html>
