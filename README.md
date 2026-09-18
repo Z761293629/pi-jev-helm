@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, and safe typed Classification Provider fail-open handling are implemented. The remaining Routed Run controls and diagnostics remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
+> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, and recoverable Baseline checkpoints are implemented. Routing Explanations, live footer status, and the real Jev compatibility gate remain under development in later child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
 
 ## How V1 works
 
@@ -21,8 +21,9 @@ For each new **Routed Run** started while Pi is idle, Helm:
    - otherwise deep reasoning → `reasoning`
    - otherwise → `fast`
 4. Resolves the selected Route to its configured **Route Target**: an exact Pi provider, model, and thinking level.
-5. Uses that target for the complete Routed Run, including tools, retries, and queued continuations.
-6. Restores the Baseline Model and thinking level after the run settles.
+5. Persists a recoverable, non-context checkpoint containing the Baseline Model and thinking level before changing either value.
+6. Uses the target for the complete Routed Run, including tools, retries, and queued continuations.
+7. Restores the latest Baseline after the run settles and marks the checkpoint complete only after restoration succeeds.
 
 A low-confidence classification, Provider failure, unavailable Route Target, or failed model transition keeps or restores the Baseline Model so the original request can continue.
 
@@ -46,7 +47,13 @@ V1 command grammar:
 /helm why
 ```
 
-The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Classification uses one total 2500 ms attempt, validates the complete success contract, and maps cancellation, transport, HTTP, timeout, and protocol failures to safe typed outcomes before failing open. Routing Explanations and later lifecycle diagnostics are added by subsequent V1 stages.
+The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Classification uses one total 2500 ms attempt, validates the complete success contract, and maps cancellation, transport, HTTP, timeout, and protocol failures to safe typed outcomes before failing open. Routing Explanations and live footer diagnostics are added by subsequent V1 stages.
+
+## Lifecycle recovery
+
+Baseline checkpoints are versioned custom session entries and never enter model context. Helm updates the pending checkpoint when an Explicit Model Override or Explicit Thinking Override changes the Baseline. It attempts restoration on settlement and every graceful Pi teardown path (`reload`, session replacement, fork, and normal exit). When the same session or branch starts again, Helm restores its latest incomplete checkpoint before doing new routing work. A failed restoration remains explicitly incomplete and is retried instead of being recorded as successful.
+
+Recovery is limited by Pi's public extension lifecycle and session persistence APIs. A forced process termination that prevents the checkpoint entry from being written durably (for example `SIGKILL`, power loss, or unavailable session storage) cannot be guaranteed recoverable. Helm therefore refuses to apply a Route Target when the initial checkpoint write fails. Checkpoints are session-branch state; a different new session cannot read an interrupted session's entries, but it also starts from Pi's normal model selection rather than inheriting that session's temporary Route Target. If a stored Baseline model can no longer be resolved or authenticated, Helm records restoration failure, skips new routing attempts, retries on later work, and allows Pi's original request to continue on the current model because the public lifecycle hook cannot suspend or replace that request.
 
 ## Configuration
 

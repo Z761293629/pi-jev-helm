@@ -64,6 +64,10 @@ _Avoid_: Idle prompt, single-message route
 The Pi model and thinking level selected before a Routed Run. They are restored after it settles unless an Explicit Model Override supersedes them.
 _Avoid_: Default model, fallback model
 
+**Baseline Checkpoint**:
+A versioned, non-context session record of the latest Baseline Model while temporary routing is active. It remains incomplete until restoration succeeds and supports recovery after ordinary lifecycle interruption.
+_Avoid_: Route Target snapshot, global default
+
 **Explicit Model Override**:
 A model selection not initiated by Pi Jev Helm during an active Routed Run. It immediately supersedes the Route Target and becomes the new Baseline Model together with its effective thinking level.
 _Avoid_: Route Override, thinking-level adjustment

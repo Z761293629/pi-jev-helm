@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 
 import type {
   ExtensionAPI,
@@ -14,14 +15,43 @@ import { loadHelmConfig, type ConfigLoadResult, type Route, ROUTES } from "./con
 import { selectRoute } from "./routing-policy.js";
 
 const HELM_COMMANDS = ["auto", "route"] as const;
+const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
+const CHECKPOINT_SCHEMA_VERSION = 1;
 
 type PiModel = NonNullable<ExtensionContext["model"]>;
+type PiThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
 
-type ActiveRoutedRun = {
-  route: Route;
+type TrackedBaseline = {
   baselineModel: PiModel;
-  baselineThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>;
+  baselineThinkingLevel: PiThinkingLevel;
+  checkpointId: string;
+  helmSelectedModel: PiModel;
 };
+
+type ActiveRoutedRun = TrackedBaseline & { route: Route };
+
+type CheckpointStatus = "pending" | "restoration_failed" | "complete";
+
+type BaselineCheckpoint = {
+  schemaVersion: typeof CHECKPOINT_SCHEMA_VERSION;
+  checkpointId: string;
+  status: CheckpointStatus;
+  baseline: {
+    provider: string;
+    model: string;
+    thinkingLevel: PiThinkingLevel;
+  };
+};
+
+const THINKING_LEVELS: readonly PiThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
 
 type RouteTargetAttempt = {
   route: Route;
@@ -30,11 +60,15 @@ type RouteTargetAttempt = {
 };
 
 type HelmModelSelectionOperation = {
+  kind: "model";
   target: PiModel;
   thinkingClampPending: boolean;
 };
 
-type HelmThinkingSelectionOperation = Record<never, never>;
+type HelmThinkingSelectionOperation = {
+  kind: "thinking";
+  target: PiThinkingLevel;
+};
 
 const helmSelectionOperation = new AsyncLocalStorage<
   HelmModelSelectionOperation | HelmThinkingSelectionOperation
@@ -48,7 +82,10 @@ interface HelmState {
   routingAttemptedForCurrentRun: boolean;
   activeRoutedRun: ActiveRoutedRun | undefined;
   pendingRouteTargetApplication: ActiveRoutedRun | undefined;
-  pendingBaselineRestoration: ActiveRoutedRun | undefined;
+  pendingBaselineRestoration: TrackedBaseline | undefined;
+  baselineRestorationInFlight: TrackedBaseline | undefined;
+  pendingCheckpointRecovery: BaselineCheckpoint | undefined;
+  checkpointRecoverySelectedModel: PiModel | undefined;
   routeTargetApplicationRevision: number;
   helmModelSelection: HelmModelSelectionOperation | undefined;
   helmThinkingSelection: HelmThinkingSelectionOperation | undefined;
@@ -150,12 +187,73 @@ function notifyRoutingFailure(ctx: ExtensionContext, message: string): void {
   if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
 }
 
+function isBaselineCheckpoint(value: unknown): value is BaselineCheckpoint {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Partial<BaselineCheckpoint>;
+  const baseline = candidate.baseline as Partial<BaselineCheckpoint["baseline"]> | undefined;
+  return (
+    candidate.schemaVersion === CHECKPOINT_SCHEMA_VERSION &&
+    typeof candidate.checkpointId === "string" &&
+    candidate.checkpointId.length > 0 &&
+    (candidate.status === "pending" ||
+      candidate.status === "restoration_failed" ||
+      candidate.status === "complete") &&
+    typeof baseline === "object" &&
+    baseline !== null &&
+    typeof baseline.provider === "string" &&
+    baseline.provider.length > 0 &&
+    typeof baseline.model === "string" &&
+    baseline.model.length > 0 &&
+    THINKING_LEVELS.includes(baseline.thinkingLevel as PiThinkingLevel)
+  );
+}
+
+function latestIncompleteCheckpoint(ctx: ExtensionContext): BaselineCheckpoint | undefined {
+  const branch = ctx.sessionManager.getBranch();
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry?.type !== "custom" || entry.customType !== CHECKPOINT_ENTRY_TYPE) continue;
+    if (!isBaselineCheckpoint(entry.data) || entry.data.status === "complete") return undefined;
+    return entry.data;
+  }
+  return undefined;
+}
+
+function appendCheckpointData(pi: ExtensionAPI, checkpoint: BaselineCheckpoint): void {
+  pi.appendEntry(CHECKPOINT_ENTRY_TYPE, checkpoint);
+}
+
+function checkpointData(
+  run: TrackedBaseline,
+  status: CheckpointStatus,
+): BaselineCheckpoint {
+  return {
+    schemaVersion: CHECKPOINT_SCHEMA_VERSION,
+    checkpointId: run.checkpointId,
+    status,
+    baseline: {
+      provider: run.baselineModel.provider,
+      model: run.baselineModel.id,
+      thinkingLevel: run.baselineThinkingLevel,
+    },
+  };
+}
+
+function appendCheckpoint(
+  pi: ExtensionAPI,
+  run: TrackedBaseline,
+  status: CheckpointStatus,
+): void {
+  appendCheckpointData(pi, checkpointData(run, status));
+}
+
 async function selectModelFromHelm(
   pi: ExtensionAPI,
   state: HelmState,
   model: PiModel,
 ): Promise<boolean> {
   const operation: HelmModelSelectionOperation = {
+    kind: "model",
     target: model,
     thinkingClampPending: true,
   };
@@ -172,10 +270,11 @@ function selectThinkingLevelFromHelm(
   state: HelmState,
   level: ReturnType<ExtensionAPI["getThinkingLevel"]>,
 ): void {
-  const operation: HelmThinkingSelectionOperation = {};
+  const operation: HelmThinkingSelectionOperation = { kind: "thinking", target: level };
   state.helmThinkingSelection = operation;
   try {
     helmSelectionOperation.run(operation, () => pi.setThinkingLevel(level));
+    operation.target = pi.getThinkingLevel();
   } finally {
     if (state.helmThinkingSelection === operation) state.helmThinkingSelection = undefined;
   }
@@ -183,7 +282,7 @@ function selectThinkingLevelFromHelm(
 
 async function restoreBaseline(
   pi: ExtensionAPI,
-  run: ActiveRoutedRun,
+  run: TrackedBaseline,
   ctx: ExtensionContext,
   state: HelmState,
 ): Promise<boolean> {
@@ -215,6 +314,8 @@ async function restoreBaseline(
     if (state.routeTargetApplicationRevision !== restorationRevision) continue;
     if (!thinkingRestored) {
       notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline thinking level");
+    } else if (modelRestored) {
+      run.baselineThinkingLevel = pi.getThinkingLevel();
     }
 
     return modelRestored && thinkingRestored;
@@ -223,19 +324,88 @@ async function restoreBaseline(
 
 async function restoreTrackedBaseline(
   pi: ExtensionAPI,
-  run: ActiveRoutedRun,
+  run: TrackedBaseline,
   ctx: ExtensionContext,
   state: HelmState,
   retainFailedRestoration: boolean,
 ): Promise<boolean> {
   state.pendingBaselineRestoration = run;
-  const restored = await restoreBaseline(pi, run, ctx, state);
+  state.baselineRestorationInFlight = run;
+  let restored: boolean;
+  try {
+    restored = await restoreBaseline(pi, run, ctx, state);
+  } finally {
+    if (state.baselineRestorationInFlight === run) state.baselineRestorationInFlight = undefined;
+  }
+  try {
+    appendCheckpoint(pi, run, restored ? "complete" : "restoration_failed");
+  } catch {
+    if (restored) {
+      restored = false;
+      notifyRoutingFailure(ctx, "Pi Jev Helm restored the Baseline but could not complete its checkpoint");
+    }
+  }
   if (restored || !retainFailedRestoration) {
     if (state.pendingBaselineRestoration === run) state.pendingBaselineRestoration = undefined;
   } else {
     state.pendingBaselineRestoration = run;
   }
   return restored;
+}
+
+async function recoverCheckpoint(
+  pi: ExtensionAPI,
+  checkpoint: BaselineCheckpoint,
+  ctx: ExtensionContext,
+  state: HelmState,
+): Promise<boolean> {
+  let model: PiModel | undefined;
+  try {
+    model = ctx.modelRegistry.find(checkpoint.baseline.provider, checkpoint.baseline.model);
+  } catch {
+    model = undefined;
+  }
+  if (
+    !model ||
+    !isExactModel(model, checkpoint.baseline.provider, checkpoint.baseline.model)
+  ) {
+    const failedCheckpoint: BaselineCheckpoint = {
+      ...checkpoint,
+      status: "restoration_failed",
+    };
+    state.pendingCheckpointRecovery = failedCheckpoint;
+    try {
+      appendCheckpointData(pi, failedCheckpoint);
+    } catch {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not record the checkpoint restoration failure");
+    }
+    notifyRoutingFailure(ctx, "Pi Jev Helm could not resolve the checkpoint Baseline Model");
+    return false;
+  }
+
+  const run: TrackedBaseline = {
+    baselineModel: model,
+    baselineThinkingLevel: checkpoint.baseline.thinkingLevel,
+    checkpointId: checkpoint.checkpointId,
+    helmSelectedModel: ctx.model ?? model,
+  };
+  return restoreTrackedBaseline(pi, run, ctx, state, true);
+}
+
+async function attemptCheckpointRecovery(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: HelmState,
+): Promise<boolean> {
+  const checkpoint = state.pendingCheckpointRecovery;
+  if (!checkpoint) return true;
+
+  const recovered = await recoverCheckpoint(pi, checkpoint, ctx, state);
+  if (recovered || state.pendingBaselineRestoration) {
+    state.pendingCheckpointRecovery = undefined;
+    state.checkpointRecoverySelectedModel = undefined;
+  }
+  return recovered;
 }
 
 async function failAfterRouteTargetApplication(
@@ -281,6 +451,8 @@ async function beginRoutedRun(
     route,
     baselineModel: ctx.model,
     baselineThinkingLevel: pi.getThinkingLevel(),
+    checkpointId: randomUUID(),
+    helmSelectedModel: ctx.model,
   };
   const target = state.configuration.config.routes[route];
   let model: PiModel | undefined;
@@ -295,7 +467,15 @@ async function beginRoutedRun(
     return;
   }
 
+  run.helmSelectedModel = model;
   state.pendingRouteTargetApplication = run;
+  try {
+    appendCheckpoint(pi, run, "pending");
+  } catch {
+    state.pendingRouteTargetApplication = undefined;
+    notifyRoutingFailure(ctx, `${source} ${route} could not store the Baseline checkpoint`);
+    return;
+  }
   try {
     const modelSelected = await selectModelFromHelm(pi, state, model);
     if (state.routeTargetApplicationRevision !== cancellationRevision) {
@@ -463,12 +643,15 @@ export default function helmExtension(pi: ExtensionAPI): void {
     activeRoutedRun: undefined,
     pendingRouteTargetApplication: undefined,
     pendingBaselineRestoration: undefined,
+    baselineRestorationInFlight: undefined,
+    pendingCheckpointRecovery: undefined,
+    checkpointRecoverySelectedModel: undefined,
     routeTargetApplicationRevision: 0,
     helmModelSelection: undefined,
     helmThinkingSelection: undefined,
   };
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
     state.configuration = await loadHelmConfig();
     state.automaticRoutingOverride = undefined;
     state.pendingRouteOverride = undefined;
@@ -477,51 +660,95 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.activeRoutedRun = undefined;
     state.pendingRouteTargetApplication = undefined;
     state.pendingBaselineRestoration = undefined;
+    state.baselineRestorationInFlight = undefined;
+    state.pendingCheckpointRecovery = undefined;
+    state.checkpointRecoverySelectedModel = undefined;
     state.routeTargetApplicationRevision = 0;
     state.helmModelSelection = undefined;
     state.helmThinkingSelection = undefined;
+
+    const checkpoint = latestIncompleteCheckpoint(ctx);
+    if (checkpoint) {
+      state.pendingCheckpointRecovery = checkpoint;
+      state.checkpointRecoverySelectedModel = ctx.model;
+      await attemptCheckpointRecovery(pi, ctx, state);
+    }
   });
 
-  pi.on("model_select", (event) => {
-    const helmSelection = state.helmModelSelection;
+  pi.on("model_select", (event, ctx) => {
+    const scopedSelection = helmSelectionOperation.getStore();
     if (
-      helmSelection &&
-      helmSelectionOperation.getStore() === helmSelection &&
-      isExactModel(event.model, helmSelection.target.provider, helmSelection.target.id)
+      scopedSelection?.kind === "model" &&
+      isExactModel(event.model, scopedSelection.target.provider, scopedSelection.target.id)
     ) {
-      state.helmModelSelection = undefined;
+      if (state.helmModelSelection === scopedSelection) state.helmModelSelection = undefined;
       return;
     }
 
     state.routeTargetApplicationRevision += 1;
-    const run =
+    let run: TrackedBaseline | undefined =
       state.pendingRouteTargetApplication ??
       state.activeRoutedRun ??
       state.pendingBaselineRestoration;
+    const recoveryCheckpoint = run ? undefined : state.pendingCheckpointRecovery;
+    const recoveryOverride = recoveryCheckpoint !== undefined;
+    if (recoveryCheckpoint) {
+      run = {
+        baselineModel: event.model,
+        baselineThinkingLevel: pi.getThinkingLevel(),
+        checkpointId: recoveryCheckpoint.checkpointId,
+        helmSelectedModel: event.model,
+      };
+      state.pendingCheckpointRecovery = checkpointData(run, "pending");
+    }
+    const completedByExplicitOverride =
+      !!run &&
+      (recoveryOverride ||
+        state.activeRoutedRun === run ||
+        (state.pendingBaselineRestoration === run && state.baselineRestorationInFlight !== run));
+    let checkpointCompleted = false;
     if (run) {
       run.baselineModel = event.model;
       run.baselineThinkingLevel = pi.getThinkingLevel();
+      try {
+        appendCheckpoint(pi, run, "pending");
+        if (completedByExplicitOverride) {
+          appendCheckpoint(pi, run, "complete");
+          checkpointCompleted = true;
+        }
+      } catch {
+        notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
+        if (completedByExplicitOverride && !recoveryOverride) {
+          state.pendingBaselineRestoration = run;
+        }
+      }
     }
 
     state.activeRoutedRun = undefined;
-    state.pendingBaselineRestoration = undefined;
+    if (checkpointCompleted && recoveryOverride) {
+      state.pendingCheckpointRecovery = undefined;
+      state.checkpointRecoverySelectedModel = undefined;
+    }
+    if (checkpointCompleted && state.pendingBaselineRestoration === run) {
+      state.pendingBaselineRestoration = undefined;
+    } else if (!completedByExplicitOverride) {
+      state.pendingBaselineRestoration = undefined;
+    }
   });
 
-  pi.on("thinking_level_select", (event) => {
-    const helmThinkingSelection = state.helmThinkingSelection;
+  pi.on("thinking_level_select", (event, ctx) => {
+    const scopedSelection = helmSelectionOperation.getStore();
     if (
-      helmThinkingSelection &&
-      helmSelectionOperation.getStore() === helmThinkingSelection
+      scopedSelection?.kind === "thinking" &&
+      (state.helmThinkingSelection === scopedSelection || event.level === scopedSelection.target)
     ) {
-      state.helmThinkingSelection = undefined;
+      if (state.helmThinkingSelection === scopedSelection) {
+        state.helmThinkingSelection = undefined;
+      }
       return;
     }
-    const helmModelSelection = state.helmModelSelection;
-    if (
-      helmModelSelection?.thinkingClampPending &&
-      helmSelectionOperation.getStore() === helmModelSelection
-    ) {
-      helmModelSelection.thinkingClampPending = false;
+    if (scopedSelection?.kind === "model" && scopedSelection.thinkingClampPending) {
+      scopedSelection.thinkingClampPending = false;
       return;
     }
 
@@ -530,7 +757,43 @@ export default function helmExtension(pi: ExtensionAPI): void {
       state.activeRoutedRun ??
       state.pendingRouteTargetApplication ??
       state.pendingBaselineRestoration;
-    if (run) run.baselineThinkingLevel = event.level;
+    if (run) {
+      if (ctx.model && !isExactModel(ctx.model, run.helmSelectedModel.provider, run.helmSelectedModel.id)) {
+        run.baselineModel = ctx.model;
+      }
+      run.baselineThinkingLevel = event.level;
+      try {
+        appendCheckpoint(pi, run, "pending");
+      } catch {
+        notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
+      }
+      return;
+    }
+
+    const recovery = state.pendingCheckpointRecovery;
+    if (!recovery) return;
+    const selectedModel = state.checkpointRecoverySelectedModel;
+    const explicitModel =
+      ctx.model &&
+      selectedModel &&
+      !isExactModel(ctx.model, selectedModel.provider, selectedModel.id)
+        ? ctx.model
+        : undefined;
+    const updatedCheckpoint: BaselineCheckpoint = {
+      ...recovery,
+      status: "pending",
+      baseline: {
+        provider: explicitModel?.provider ?? recovery.baseline.provider,
+        model: explicitModel?.id ?? recovery.baseline.model,
+        thinkingLevel: event.level,
+      },
+    };
+    state.pendingCheckpointRecovery = updatedCheckpoint;
+    try {
+      appendCheckpointData(pi, updatedCheckpoint);
+    } catch {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
+    }
   });
 
   pi.on("input", (event) => {
@@ -538,6 +801,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    if (!(await attemptCheckpointRecovery(pi, ctx, state))) return;
     if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
     if (state.routingAttemptedForCurrentRun) return;
 
@@ -574,6 +838,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.pendingRouteOverride = undefined;
     state.pendingIdleUserMessage = undefined;
     state.routingAttemptedForCurrentRun = false;
+    state.routeTargetApplicationRevision += 1;
+    const pendingApplication = state.pendingRouteTargetApplication;
+    state.pendingRouteTargetApplication = undefined;
+    if (pendingApplication) {
+      await restoreTrackedBaseline(pi, pendingApplication, ctx, state, false);
+    }
+    await attemptCheckpointRecovery(pi, ctx, state);
     await finishRoutedRun(pi, state, ctx, false);
   });
 

@@ -24,13 +24,25 @@ type HelmCommand = {
 
 type Notice = { message: string; level: string };
 type FakeModel = { provider: string; id: string };
+type FakeSessionEntry = {
+  type: "custom";
+  id: string;
+  parentId: string | null;
+  timestamp: string;
+  customType: string;
+  data?: unknown;
+};
 type HarnessOptions = {
+  appendEntryError?: boolean;
   appliedModels?: Record<string, FakeModel[]>;
+  initialModel?: FakeModel;
+  initialThinkingLevel?: string;
   beforeModelApplication?: Record<string, () => Promise<void>>;
   beforeModelSelectDispatch?: (
     model: FakeModel,
     selectModel: (model?: FakeModel, level?: string) => Promise<void>,
   ) => Promise<void>;
+  beforeThinkingLevelSelectDispatch?: (level: string) => Promise<void>;
   unavailableModels?: string[];
   modelResults?: Record<string, boolean[]>;
   mutateModelBeforeFailure?: string[];
@@ -38,6 +50,7 @@ type HarnessOptions = {
   registryResults?: Record<string, FakeModel | null>;
   scopedModels?: string[];
   signal?: AbortSignal;
+  sessionEntries?: FakeSessionEntry[];
   thinkingLevelByModel?: Record<string, string>;
   thinkingLevelOnModelSelect?: Record<string, string>;
 };
@@ -55,14 +68,16 @@ function createHarness(
   const notices: Notice[] = [];
   const modelChanges: string[] = [];
   const thinkingLevelChanges: string[] = [];
+  const sessionEntries = options.sessionEntries ?? [];
   const baselineModel = { provider: "baseline-provider", id: "baseline-model" };
   const explicitModel = { provider: "user-provider", id: "user-model" };
   const models = [
     baselineModel,
     explicitModel,
+    ...(options.initialModel ? [options.initialModel] : []),
     ...Object.values(completeRoutes).map(({ provider, model }) => ({ provider, id: model })),
   ];
-  let thinkingLevel = "medium";
+  let thinkingLevel = options.initialThinkingLevel ?? "medium";
 
   async function dispatch(name: string, event: unknown): Promise<void> {
     for (const handler of events.get(name) ?? []) {
@@ -73,11 +88,16 @@ function createHarness(
   const contextValue = {
     mode,
     hasUI: mode === "tui" || mode === "rpc",
-    model: baselineModel as FakeModel | undefined,
+    model: (options.initialModel ?? baselineModel) as FakeModel | undefined,
     signal: options.signal,
     scopedModels: (options.scopedModels ?? []).map((key) => ({
       model: models.find((model) => modelKey(model) === key),
     })),
+    sessionManager: {
+      getBranch() {
+        return [...sessionEntries];
+      },
+    },
     modelRegistry: {
       find(provider: string, id: string) {
         const key = `${provider}/${id}`;
@@ -103,6 +123,7 @@ function createHarness(
     const previousLevel = thinkingLevel;
     thinkingLevel = level;
     if (level !== previousLevel) {
+      await options.beforeThinkingLevelSelectDispatch?.(level);
       await dispatch("thinking_level_select", {
         type: "thinking_level_select",
         level,
@@ -142,6 +163,18 @@ function createHarness(
     registerCommand(name: string, command: HelmCommand) {
       commands.set(name, command);
     },
+    appendEntry(customType: string, data?: unknown) {
+      if (options.appendEntryError) throw new Error("session storage unavailable");
+      const previous = sessionEntries.at(-1);
+      sessionEntries.push({
+        type: "custom",
+        id: `entry-${sessionEntries.length + 1}`,
+        parentId: previous?.id ?? null,
+        timestamp: new Date(sessionEntries.length).toISOString(),
+        customType,
+        data,
+      });
+    },
     async setModel(model: FakeModel) {
       const key = modelKey(model);
       modelChanges.push(key);
@@ -180,6 +213,7 @@ function createHarness(
     context,
     modelChanges,
     thinkingLevelChanges,
+    sessionEntries,
     get currentModel() {
       return contextValue.model;
     },
@@ -221,6 +255,16 @@ async function writeConfig(overrides: Record<string, unknown> = {}): Promise<voi
     join(agentDir, "pi-jev-helm.json"),
     JSON.stringify({ schemaVersion: 1, routes: completeRoutes, ...overrides }),
   );
+}
+
+async function interruptCodingRouteTarget(): Promise<FakeSessionEntry[]> {
+  await writeConfig({ automaticRouting: false });
+  const sessionEntries: FakeSessionEntry[] = [];
+  const interrupted = createHarness("tui", { sessionEntries });
+  await interrupted.emit("session_start", { reason: "startup" });
+  await interrupted.command("route coding");
+  await interrupted.emit("before_agent_start", { prompt: "interrupted work" });
+  return sessionEntries;
 }
 
 describe("Pi Jev Helm extension", () => {
@@ -601,6 +645,351 @@ describe("Pi Jev Helm extension", () => {
     ]);
   });
 
+  it("persists and completes a recoverable Baseline checkpoint around a Routed Run", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+    expect(harness.sessionEntries.map((entry) => entry.data)).toEqual([
+      expect.objectContaining({
+        schemaVersion: 1,
+        status: "pending",
+        baseline: {
+          provider: "baseline-provider",
+          model: "baseline-model",
+          thinkingLevel: "medium",
+        },
+      }),
+    ]);
+
+    await harness.emit("agent_settled");
+    expect(harness.sessionEntries.map((entry) => entry.data)).toEqual([
+      expect.objectContaining({ status: "pending" }),
+      expect.objectContaining({ status: "complete" }),
+    ]);
+  });
+
+  it("cancels pending Route Target application during teardown and restores Baseline", async () => {
+    await writeConfig({ automaticRouting: false });
+    const targetApplicationStarted = deferred<void>();
+    const releaseTargetApplication = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "anthropic/coding/model": async () => {
+          targetApplicationStarted.resolve(undefined);
+          await releaseTargetApplication.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    const routing = harness.emit("before_agent_start", { prompt: "interrupted startup" });
+    await targetApplicationStarted.promise;
+    await harness.emit("session_shutdown", { reason: "reload" });
+    releaseTargetApplication.resolve(undefined);
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(harness.thinkingLevel).toBe("medium");
+    expect(harness.sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({ status: "complete" }),
+    );
+  });
+
+  it.each(["reload", "new", "resume", "fork", "quit"] as const)(
+    "restores and completes the Baseline checkpoint before %s teardown",
+    async (reason) => {
+      await writeConfig({ automaticRouting: false });
+      const harness = createHarness();
+      await harness.emit("session_start", { reason: "startup" });
+      await harness.command("route reasoning");
+      await harness.emit("before_agent_start", { prompt: "reason" });
+
+      await harness.emit("session_shutdown", { reason });
+
+      expect(harness.currentModel).toMatchObject({
+        provider: "baseline-provider",
+        id: "baseline-model",
+      });
+      expect(harness.thinkingLevel).toBe("medium");
+      expect(harness.sessionEntries.at(-1)?.data).toEqual(
+        expect.objectContaining({ status: "complete" }),
+      );
+    },
+  );
+
+  it("recovers an incomplete checkpoint before a restarted session accepts work", async () => {
+    const sessionEntries = await interruptCodingRouteTarget();
+
+    const restarted = createHarness("tui", {
+      sessionEntries,
+      initialModel: {
+        provider: completeRoutes.coding.provider,
+        id: completeRoutes.coding.model,
+      },
+      initialThinkingLevel: completeRoutes.coding.thinkingLevel,
+    });
+    await restarted.emit("session_start", { reason: "startup" });
+
+    expect(restarted.modelChanges).toEqual(["baseline-provider/baseline-model"]);
+    expect(restarted.currentModel).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(restarted.thinkingLevel).toBe("medium");
+    expect(sessionEntries.map((entry) => entry.data)).toEqual([
+      expect.objectContaining({ status: "pending" }),
+      expect.objectContaining({ status: "complete" }),
+    ]);
+  });
+
+  it("records an unresolvable recovery failure and lets an Explicit Model Override repair it", async () => {
+    const sessionEntries = await interruptCodingRouteTarget();
+
+    const restarted = createHarness("tui", {
+      sessionEntries,
+      initialModel: {
+        provider: completeRoutes.coding.provider,
+        id: completeRoutes.coding.model,
+      },
+      initialThinkingLevel: completeRoutes.coding.thinkingLevel,
+      registryResults: { "baseline-provider/baseline-model": null },
+    });
+    await restarted.emit("session_start", { reason: "startup" });
+
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({ status: "restoration_failed" }),
+    );
+    await restarted.selectThinkingLevel("xhigh");
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "pending",
+        baseline: {
+          provider: "baseline-provider",
+          model: "baseline-model",
+          thinkingLevel: "xhigh",
+        },
+      }),
+    );
+
+    await restarted.selectModel();
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "complete",
+        baseline: {
+          provider: "user-provider",
+          model: "user-model",
+          thinkingLevel: "low",
+        },
+      }),
+    );
+  });
+
+  it("records a failed recovery explicitly and retries it before new work", async () => {
+    const sessionEntries = await interruptCodingRouteTarget();
+
+    const restarted = createHarness("tui", {
+      sessionEntries,
+      initialModel: {
+        provider: completeRoutes.coding.provider,
+        id: completeRoutes.coding.model,
+      },
+      initialThinkingLevel: completeRoutes.coding.thinkingLevel,
+      modelResults: { "baseline-provider/baseline-model": [false, true] },
+    });
+    await restarted.emit("session_start", { reason: "startup" });
+
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({ status: "restoration_failed" }),
+    );
+    expect(sessionEntries.map((entry) => (entry.data as { status?: string }).status)).not.toContain(
+      "complete",
+    );
+    expect(restarted.currentModel).toMatchObject({
+      provider: completeRoutes.coding.provider,
+      id: completeRoutes.coding.model,
+    });
+    expect(restarted.notices.at(-1)).toMatchObject({ level: "warning" });
+
+    await restarted.emit("before_agent_start", { prompt: "new work" });
+    expect(restarted.currentModel).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({ status: "complete" }),
+    );
+  });
+
+  it("documents that forced termination cannot recover a checkpoint lost before durable persistence", async () => {
+    const sessionEntries = await interruptCodingRouteTarget();
+
+    sessionEntries.length = 0;
+    const restarted = createHarness("tui", {
+      sessionEntries,
+      initialModel: {
+        provider: completeRoutes.coding.provider,
+        id: completeRoutes.coding.model,
+      },
+      initialThinkingLevel: completeRoutes.coding.thinkingLevel,
+    });
+    await restarted.emit("session_start", { reason: "startup" });
+
+    expect(restarted.modelChanges).toEqual([]);
+    expect(restarted.currentModel).toMatchObject({
+      provider: completeRoutes.coding.provider,
+      id: completeRoutes.coding.model,
+    });
+  });
+
+  it("does not apply a Route Target when a recoverable checkpoint cannot be written", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", { appendEntryError: true });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "do not risk temporary state" });
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+  });
+
+  it("completes a failed restoration checkpoint when an Explicit Model Override supersedes it", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      modelResults: { "baseline-provider/baseline-model": [false] },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "routed work" });
+    await harness.emit("agent_settled");
+
+    await harness.selectModel();
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "complete",
+        baseline: expect.objectContaining({
+          provider: "user-provider",
+          model: "user-model",
+        }),
+      }),
+    );
+
+    const changesBeforeNextWork = [...harness.modelChanges];
+    await harness.emit("before_agent_start", { prompt: "next work" });
+    expect(harness.modelChanges).toEqual(changesBeforeNextWork);
+  });
+
+  it("updates the recoverable checkpoint for an Explicit Thinking Override", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    await harness.selectThinkingLevel("xhigh");
+    expect(harness.sessionEntries.map((entry) => entry.data)).toEqual([
+      expect.objectContaining({ status: "pending" }),
+      expect.objectContaining({
+        status: "pending",
+        baseline: expect.objectContaining({ thinkingLevel: "xhigh" }),
+      }),
+    ]);
+
+    await harness.emit("agent_settled");
+    expect(harness.thinkingLevel).toBe("xhigh");
+    expect(harness.sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "complete",
+        baseline: expect.objectContaining({ thinkingLevel: "xhigh" }),
+      }),
+    );
+  });
+
+  it("checkpoints an Explicit Model Override before its model_select notification", async () => {
+    await writeConfig({ automaticRouting: false });
+    const selectionReachedModelEvent = deferred<void>();
+    const releaseModelEvent = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelSelectDispatch: async (model) => {
+        if (modelKey(model) === "user-provider/user-model") {
+          selectionReachedModelEvent.resolve(undefined);
+          await releaseModelEvent.promise;
+        }
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    const selection = harness.selectModel();
+    await selectionReachedModelEvent.promise;
+
+    expect(harness.sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "pending",
+        baseline: {
+          provider: "user-provider",
+          model: "user-model",
+          thinkingLevel: "low",
+        },
+      }),
+    );
+
+    releaseModelEvent.resolve(undefined);
+    await selection;
+  });
+
+  it("updates and completes the recoverable checkpoint for an Explicit Model Override", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    await harness.selectModel();
+
+    expect(harness.sessionEntries.map((entry) => entry.data)).toEqual([
+      expect.objectContaining({ status: "pending" }),
+      expect.objectContaining({
+        status: "pending",
+        baseline: {
+          provider: "user-provider",
+          model: "user-model",
+          thinkingLevel: "low",
+        },
+      }),
+      expect.objectContaining({
+        status: "pending",
+        baseline: {
+          provider: "user-provider",
+          model: "user-model",
+          thinkingLevel: "low",
+        },
+      }),
+      expect.objectContaining({
+        status: "complete",
+        baseline: {
+          provider: "user-provider",
+          model: "user-model",
+          thinkingLevel: "low",
+        },
+      }),
+    ]);
+  });
+
   it("lets an Explicit Model Override supersede an active Routed Run and become the Baseline Model", async () => {
     await writeConfig({ automaticRouting: false });
     const harness = createHarness();
@@ -645,6 +1034,41 @@ describe("Pi Jev Helm extension", () => {
       "baseline-provider/baseline-model",
       "user-provider/user-model",
     ]);
+  });
+
+  it("does not treat a delayed Helm thinking event as an Explicit Thinking Override", async () => {
+    await writeConfig({ automaticRouting: false });
+    const targetThinkingSelectionStarted = deferred<void>();
+    const releaseTargetThinkingSelection = deferred<void>();
+    const targetThinkingEventObserved = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeThinkingLevelSelectDispatch: async (level) => {
+        if (level === completeRoutes.coding.thinkingLevel) {
+          targetThinkingSelectionStarted.resolve(undefined);
+          await releaseTargetThinkingSelection.promise;
+        }
+      },
+    });
+    harness.events.get("thinking_level_select")?.push(() => {
+      targetThinkingEventObserved.resolve(undefined);
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    const routing = harness.emit("before_agent_start", { prompt: "implement this" });
+    await targetThinkingSelectionStarted.promise;
+    await routing;
+    releaseTargetThinkingSelection.resolve(undefined);
+    await targetThinkingEventObserved.promise;
+    await harness.emit("agent_settled");
+
+    expect(harness.thinkingLevel).toBe("medium");
+    expect(harness.sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({
+        status: "complete",
+        baseline: expect.objectContaining({ thinkingLevel: "medium" }),
+      }),
+    );
   });
 
   it("does not treat Helm's model clamping as an Explicit Thinking Override", async () => {
