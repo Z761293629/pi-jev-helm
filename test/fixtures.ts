@@ -1,3 +1,11 @@
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
 export const completeRoutes = {
   fast: { provider: "openrouter", model: "fast/model", thinkingLevel: "off" },
   coding: { provider: "anthropic", model: "coding/model", thinkingLevel: "high" },

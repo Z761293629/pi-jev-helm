@@ -9,7 +9,12 @@ import type {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import helmExtension from "../src/index.js";
-import { completeRoutes, createDecisionsResponse, restoreAgentDirectory } from "./fixtures.js";
+import {
+  completeRoutes,
+  createDecisionsResponse,
+  deferred,
+  restoreAgentDirectory,
+} from "./fixtures.js";
 
 type EventHandler = (event: never, ctx: ExtensionContext) => Promise<unknown> | unknown;
 type HelmCommand = {
@@ -21,6 +26,7 @@ type Notice = { message: string; level: string };
 type FakeModel = { provider: string; id: string };
 type HarnessOptions = {
   appliedModels?: Record<string, FakeModel[]>;
+  beforeModelApplication?: Record<string, () => Promise<void>>;
   unavailableModels?: string[];
   modelResults?: Record<string, boolean[]>;
   mutateModelBeforeFailure?: string[];
@@ -29,6 +35,7 @@ type HarnessOptions = {
   scopedModels?: string[];
   signal?: AbortSignal;
   thinkingLevelByModel?: Record<string, string>;
+  thinkingLevelOnModelSelect?: Record<string, string>;
 };
 
 function modelKey(model: FakeModel): string {
@@ -45,11 +52,19 @@ function createHarness(
   const modelChanges: string[] = [];
   const thinkingLevelChanges: string[] = [];
   const baselineModel = { provider: "baseline-provider", id: "baseline-model" };
+  const explicitModel = { provider: "user-provider", id: "user-model" };
   const models = [
     baselineModel,
+    explicitModel,
     ...Object.values(completeRoutes).map(({ provider, model }) => ({ provider, id: model })),
   ];
   let thinkingLevel = "medium";
+
+  async function dispatch(name: string, event: unknown): Promise<void> {
+    for (const handler of events.get(name) ?? []) {
+      await handler(event as never, context);
+    }
+  }
 
   const contextValue = {
     mode,
@@ -80,6 +95,29 @@ function createHarness(
   };
   const context = contextValue as unknown as ExtensionCommandContext;
 
+  async function dispatchThinkingLevelSelection(level: string): Promise<void> {
+    const previousLevel = thinkingLevel;
+    thinkingLevel = level;
+    if (level !== previousLevel) {
+      await dispatch("thinking_level_select", {
+        type: "thinking_level_select",
+        level,
+        previousLevel,
+      });
+    }
+  }
+
+  async function dispatchModelSelection(model: FakeModel, previousModel: FakeModel | undefined): Promise<void> {
+    if (!previousModel || modelKey(previousModel) !== modelKey(model)) {
+      await dispatch("model_select", {
+        type: "model_select",
+        model,
+        previousModel,
+        source: "set",
+      });
+    }
+  }
+
   const pi = {
     on(name: string, handler: EventHandler) {
       const handlers = events.get(name) ?? [];
@@ -97,7 +135,15 @@ function createHarness(
         if (options.mutateModelBeforeFailure?.includes(key)) contextValue.model = model;
         return false;
       }
-      contextValue.model = options.appliedModels?.[key]?.shift() ?? model;
+      await options.beforeModelApplication?.[key]?.();
+      const previousModel = contextValue.model;
+      const appliedModel = options.appliedModels?.[key]?.shift() ?? model;
+      contextValue.model = appliedModel;
+      const selectedThinkingLevel = options.thinkingLevelOnModelSelect?.[modelKey(appliedModel)];
+      if (selectedThinkingLevel !== undefined) {
+        await dispatchThinkingLevelSelection(selectedThinkingLevel);
+      }
+      await dispatchModelSelection(appliedModel, previousModel);
       return true;
     },
     getThinkingLevel() {
@@ -106,7 +152,7 @@ function createHarness(
     setThinkingLevel(level: string) {
       thinkingLevelChanges.push(level);
       const key = contextValue.model ? modelKey(contextValue.model) : "";
-      thinkingLevel = options.thinkingLevelByModel?.[key] ?? level;
+      void dispatchThinkingLevelSelection(options.thinkingLevelByModel?.[key] ?? level);
     },
   } as unknown as ExtensionAPI;
 
@@ -126,9 +172,16 @@ function createHarness(
       return thinkingLevel;
     },
     async emit(name: string, event: unknown = {}) {
-      for (const handler of events.get(name) ?? []) {
-        await handler(event as never, context);
-      }
+      await dispatch(name, event);
+    },
+    async selectModel(model: FakeModel = explicitModel, level = "low") {
+      const previousModel = contextValue.model;
+      contextValue.model = model;
+      await dispatchThinkingLevelSelection(level);
+      await dispatchModelSelection(model, previousModel);
+    },
+    async selectThinkingLevel(level: string) {
+      await dispatchThinkingLevelSelection(level);
     },
     async command(args = "") {
       const command = commands.get("helm");
@@ -530,6 +583,185 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.thinkingLevel).toBe("medium");
 
     await harness.emit("before_agent_start", { prompt: "independent request" });
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
+  });
+
+  it("lets an Explicit Model Override supersede an active Routed Run and become the Baseline Model", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    await harness.selectModel();
+    await harness.emit("agent_settled");
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
+    expect(harness.modelChanges).toEqual(["anthropic/coding/model"]);
+  });
+
+  it("does not treat Helm's model clamping as an Explicit Thinking Override", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      thinkingLevelOnModelSelect: { "anthropic/coding/model": "off" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+    await harness.emit("agent_settled");
+
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("medium");
+  });
+
+  it("cancels pending automatic application for an Explicit Model Override during classification", async () => {
+    await writeConfig({ automaticRouting: true });
+    const classificationStarted = deferred<void>();
+    const classificationResponse = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        classificationStarted.resolve(undefined);
+        return classificationResponse.promise;
+      }),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "classify this", source: "interactive" });
+
+    const routing = harness.emit("before_agent_start", { prompt: "classify this" });
+    await classificationStarted.promise;
+    await harness.selectModel();
+    classificationResponse.resolve(
+      createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
+    expect(harness.modelChanges).toEqual([]);
+  });
+
+  it("cancels pending automatic application for an Explicit Thinking Override during classification", async () => {
+    await writeConfig({ automaticRouting: true });
+    const classificationStarted = deferred<void>();
+    const classificationResponse = deferred<Response>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        classificationStarted.resolve(undefined);
+        return classificationResponse.promise;
+      }),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "classify this", source: "interactive" });
+
+    const routing = harness.emit("before_agent_start", { prompt: "classify this" });
+    await classificationStarted.promise;
+    await harness.selectThinkingLevel("high");
+    classificationResponse.resolve(
+      createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("high");
+    expect(harness.modelChanges).toEqual([]);
+  });
+
+  it("restores an Explicit Model Override that arrives while Route Target application is pending", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+    const modelApplicationStarted = deferred<void>();
+    const releaseModelApplication = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "anthropic/coding/model": async () => {
+          modelApplicationStarted.resolve(undefined);
+          await releaseModelApplication.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "classify this", source: "interactive" });
+
+    const routing = harness.emit("before_agent_start", { prompt: "classify this" });
+    await modelApplicationStarted.promise;
+    await harness.selectModel();
+    releaseModelApplication.resolve(undefined);
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "user-provider/user-model",
+    ]);
+  });
+
+  it("restores an Explicit Thinking Override that arrives while Route Target application is pending", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+    const modelApplicationStarted = deferred<void>();
+    const releaseModelApplication = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "anthropic/coding/model": async () => {
+          modelApplicationStarted.resolve(undefined);
+          await releaseModelApplication.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "classify this", source: "interactive" });
+
+    const routing = harness.emit("before_agent_start", { prompt: "classify this" });
+    await modelApplicationStarted.promise;
+    await harness.selectThinkingLevel("high");
+    releaseModelApplication.resolve(undefined);
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("high");
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
+  });
+
+  it("restores an Explicit Thinking Override with Baseline capability clamping", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      thinkingLevelByModel: { "baseline-provider/baseline-model": "low" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    await harness.selectThinkingLevel("xhigh");
+    expect(harness.currentModel).toMatchObject({ provider: "anthropic", id: "coding/model" });
+
+    await harness.emit("agent_settled");
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("low");
     expect(harness.modelChanges).toEqual([
       "anthropic/coding/model",
       "baseline-provider/baseline-model",
