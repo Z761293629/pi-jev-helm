@@ -31,7 +31,7 @@ interface HelmState {
   automaticRoutingOverride: boolean | undefined;
   pendingRouteOverride: Route | undefined;
   pendingIdleUserMessage: string | undefined;
-  helmRoutedRunActive: boolean;
+  routingAttemptedForCurrentRun: boolean;
   activeRoutedRun: ActiveRoutedRun | undefined;
   pendingBaselineRestoration: ActiveRoutedRun | undefined;
 }
@@ -164,13 +164,15 @@ async function restoreBaseline(
   return modelRestored && thinkingRestored;
 }
 
-async function restoreBaselineAfterRouteTargetFailure(
+async function failAfterRouteTargetApplication(
   pi: ExtensionAPI,
   run: ActiveRoutedRun,
   ctx: ExtensionContext,
   state: HelmState,
+  message: string,
 ): Promise<void> {
   if (!(await restoreBaseline(pi, run, ctx))) state.pendingBaselineRestoration = run;
+  notifyRoutingFailure(ctx, message);
 }
 
 async function finishRoutedRun(
@@ -222,27 +224,47 @@ async function beginRoutedRun(
 
   try {
     if (!(await pi.setModel(model))) {
-      await restoreBaselineAfterRouteTargetFailure(pi, run, ctx, state);
-      notifyRoutingFailure(ctx, `${source} ${route} Route Target is unavailable`);
+      await failAfterRouteTargetApplication(
+        pi,
+        run,
+        ctx,
+        state,
+        `${source} ${route} Route Target is unavailable`,
+      );
       return;
     }
     if (!ctx.model || !isExactModel(ctx.model, target.provider, target.model)) {
-      await restoreBaselineAfterRouteTargetFailure(pi, run, ctx, state);
-      notifyRoutingFailure(ctx, `${source} ${route} Route Target could not be applied exactly`);
+      await failAfterRouteTargetApplication(
+        pi,
+        run,
+        ctx,
+        state,
+        `${source} ${route} Route Target could not be applied exactly`,
+      );
       return;
     }
 
     pi.setThinkingLevel(target.thinkingLevel);
     if (pi.getThinkingLevel() !== target.thinkingLevel) {
-      await restoreBaselineAfterRouteTargetFailure(pi, run, ctx, state);
-      notifyRoutingFailure(ctx, `${source} ${route} Route Target thinking level could not be applied`);
+      await failAfterRouteTargetApplication(
+        pi,
+        run,
+        ctx,
+        state,
+        `${source} ${route} Route Target thinking level could not be applied`,
+      );
       return;
     }
 
     state.activeRoutedRun = run;
   } catch {
-    await restoreBaselineAfterRouteTargetFailure(pi, run, ctx, state);
-    notifyRoutingFailure(ctx, `${source} ${route} Route Target could not be applied`);
+    await failAfterRouteTargetApplication(
+      pi,
+      run,
+      ctx,
+      state,
+      `${source} ${route} Route Target could not be applied`,
+    );
   }
 }
 
@@ -344,7 +366,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     automaticRoutingOverride: undefined,
     pendingRouteOverride: undefined,
     pendingIdleUserMessage: undefined,
-    helmRoutedRunActive: false,
+    routingAttemptedForCurrentRun: false,
     activeRoutedRun: undefined,
     pendingBaselineRestoration: undefined,
   };
@@ -354,7 +376,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.automaticRoutingOverride = undefined;
     state.pendingRouteOverride = undefined;
     state.pendingIdleUserMessage = undefined;
-    state.helmRoutedRunActive = false;
+    state.routingAttemptedForCurrentRun = false;
     state.activeRoutedRun = undefined;
     state.pendingBaselineRestoration = undefined;
   });
@@ -364,16 +386,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    if (state.pendingBaselineRestoration) {
-      if (!(await finishRoutedRun(pi, state, ctx, true))) return;
-      state.helmRoutedRunActive = false;
-    }
-    if (state.helmRoutedRunActive) return;
+    if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
+    if (state.routingAttemptedForCurrentRun) return;
 
     const currentUserMessage = state.pendingIdleUserMessage;
     state.pendingIdleUserMessage = undefined;
     if (state.pendingRouteOverride) {
-      state.helmRoutedRunActive = true;
+      state.routingAttemptedForCurrentRun = true;
       const route = state.pendingRouteOverride;
       state.pendingRouteOverride = undefined;
       await beginRoutedRun(pi, { route, source: "Route Override" }, ctx, state);
@@ -381,19 +400,19 @@ export default function helmExtension(pi: ExtensionAPI): void {
     }
 
     if (!effectiveAutomaticRouting(state) || currentUserMessage === undefined) return;
-    state.helmRoutedRunActive = true;
+    state.routingAttemptedForCurrentRun = true;
     await beginAutomaticRouting(pi, currentUserMessage, ctx, state);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     await finishRoutedRun(pi, state, ctx, true);
-    state.helmRoutedRunActive = false;
+    state.routingAttemptedForCurrentRun = false;
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     state.pendingRouteOverride = undefined;
     state.pendingIdleUserMessage = undefined;
-    state.helmRoutedRunActive = false;
+    state.routingAttemptedForCurrentRun = false;
     await finishRoutedRun(pi, state, ctx, false);
   });
 

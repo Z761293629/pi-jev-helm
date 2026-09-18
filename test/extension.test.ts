@@ -235,6 +235,29 @@ describe("Pi Jev Helm extension", () => {
     },
   );
 
+  it("fails open to Baseline when an Automatic Routing target cannot be applied", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+    const harness = createHarness("tui", { unavailableModels: ["anthropic/coding/model"] });
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.emit("input", { text: "change this code", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "change this code" });
+
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.thinkingLevel).toBe("medium");
+    expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+  });
+
   it("classifies the unexpanded current user message", async () => {
     await writeConfig({ automaticRouting: true });
     const transport = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
@@ -383,6 +406,8 @@ describe("Pi Jev Helm extension", () => {
     await harness.command("route coding");
 
     await harness.emit("before_agent_start", { prompt: "first attempt" });
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
 
     expect(harness.modelChanges).toEqual([
@@ -403,6 +428,8 @@ describe("Pi Jev Helm extension", () => {
     await harness.command("route coding");
 
     await harness.emit("before_agent_start", { prompt: "first request" });
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
 
     expect(harness.modelChanges).toEqual([
@@ -508,6 +535,8 @@ describe("Pi Jev Helm extension", () => {
     await harness.emit("before_agent_start", { prompt: "partial application" });
     expect(harness.thinkingLevelChanges).toEqual(["high", "medium"]);
 
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
 
     expect(harness.modelChanges).toEqual([
@@ -518,6 +547,34 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.thinkingLevelChanges).toEqual(["high", "medium", "medium"]);
     expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
     expect(harness.thinkingLevel).toBe("medium");
+  });
+
+  it("keeps a newer Route Override pending while compensation retries before settlement", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      modelResults: { "baseline-provider/baseline-model": [false, true] },
+      thinkingLevelByModel: { "anthropic/coding/model": "off" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "partial application" });
+    await harness.command("route research");
+
+    await harness.emit("before_agent_start", { prompt: "queued continuation" });
+    await harness.command();
+
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+      "baseline-provider/baseline-model",
+    ]);
+    expect(harness.notices.at(-1)?.message).toContain("Pending Route Override: research");
+
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+
+    expect(harness.modelChanges.at(-1)).toBe("google/research/model");
   });
 
   it("rejects a non-exact model registry result without contaminating the next run", async () => {
@@ -531,6 +588,8 @@ describe("Pi Jev Helm extension", () => {
     await harness.command("route coding");
 
     await harness.emit("before_agent_start", { prompt: "first request" });
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
 
     expect(harness.modelChanges).toEqual([]);
