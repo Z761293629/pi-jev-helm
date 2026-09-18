@@ -8,9 +8,20 @@ import { loadHelmConfig, type ConfigLoadResult, type Route, ROUTES } from "./con
 
 const HELM_COMMANDS = ["auto", "route"] as const;
 
+type PiModel = NonNullable<ExtensionContext["model"]>;
+
+type ActiveRoutedRun = {
+  route: Route;
+  baselineModel: PiModel;
+  baselineThinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>;
+};
+
 interface HelmState {
   configuration: ConfigLoadResult;
   automaticRoutingOverride: boolean | undefined;
+  pendingRouteOverride: Route | undefined;
+  activeRoutedRun: ActiveRoutedRun | undefined;
+  pendingBaselineRestoration: ActiveRoutedRun | undefined;
 }
 
 function initialConfiguration(): ConfigLoadResult {
@@ -58,13 +69,18 @@ function formatConfigurationHealth(state: HelmState): string[] {
 }
 
 function formatStatus(state: HelmState, ctx: ExtensionContext): string {
+  const routedRun = state.activeRoutedRun ?? state.pendingBaselineRestoration;
+  const baselineModel = routedRun
+    ? `${routedRun.baselineModel.provider}/${routedRun.baselineModel.id}`
+    : formatBaselineModel(ctx);
+
   return [
     "Pi Jev Helm",
     ...formatConfigurationHealth(state),
-    "Routing capability: unavailable",
-    "Pending Route Override: none",
-    "Current or recent Route: none",
-    `Baseline Model: ${formatBaselineModel(ctx)}`,
+    "Routing capability: Route Override",
+    `Pending Route Override: ${state.pendingRouteOverride ?? "none"}`,
+    `Current or recent Route: ${state.activeRoutedRun?.route ?? "none"}`,
+    `Baseline Model: ${baselineModel}`,
   ].join("\n");
 }
 
@@ -87,6 +103,102 @@ function completions(argumentPrefix: string): Array<{ value: string; label: stri
 
   const matches = candidates.filter((candidate) => candidate.startsWith(argumentPrefix));
   return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+}
+
+function isModelInScope(ctx: ExtensionContext, model: PiModel): boolean {
+  return (
+    ctx.scopedModels.length === 0 ||
+    ctx.scopedModels.some(
+      (scoped) => scoped.model.provider === model.provider && scoped.model.id === model.id,
+    )
+  );
+}
+
+function notifyRoutingFailure(ctx: ExtensionContext, message: string): void {
+  if (ctx.mode === "tui") ctx.ui.notify(message, "warning");
+}
+
+async function restoreBaseline(
+  pi: ExtensionAPI,
+  run: ActiveRoutedRun,
+  ctx: ExtensionContext,
+): Promise<boolean> {
+  try {
+    const restoredModel = await pi.setModel(run.baselineModel);
+    if (!restoredModel) {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline Model");
+      return false;
+    }
+    pi.setThinkingLevel(run.baselineThinkingLevel);
+    if (pi.getThinkingLevel() !== run.baselineThinkingLevel) {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline thinking level");
+      return false;
+    }
+    return true;
+  } catch {
+    notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline Model");
+    return false;
+  }
+}
+
+async function finishRoutedRun(
+  pi: ExtensionAPI,
+  state: HelmState,
+  ctx: ExtensionContext,
+  retainFailedRestoration: boolean,
+): Promise<boolean> {
+  const run = state.activeRoutedRun ?? state.pendingBaselineRestoration;
+  state.activeRoutedRun = undefined;
+  state.pendingBaselineRestoration = undefined;
+  if (!run) return true;
+
+  const restored = await restoreBaseline(pi, run, ctx);
+  if (!restored && retainFailedRestoration) state.pendingBaselineRestoration = run;
+  return restored;
+}
+
+async function beginRouteOverride(
+  pi: ExtensionAPI,
+  route: Route,
+  ctx: ExtensionContext,
+  state: HelmState,
+): Promise<void> {
+  if (!state.configuration.ok) return;
+  if (!ctx.model) {
+    notifyRoutingFailure(ctx, `Route Override ${route} could not capture the Baseline Model`);
+    return;
+  }
+
+  const run: ActiveRoutedRun = {
+    route,
+    baselineModel: ctx.model,
+    baselineThinkingLevel: pi.getThinkingLevel(),
+  };
+  const target = state.configuration.config.routes[route];
+  const model = ctx.modelRegistry.find(target.provider, target.model);
+  if (!model || !isModelInScope(ctx, model)) {
+    notifyRoutingFailure(ctx, `Route Override ${route} target is unavailable`);
+    return;
+  }
+
+  try {
+    if (!(await pi.setModel(model))) {
+      notifyRoutingFailure(ctx, `Route Override ${route} target is unavailable`);
+      return;
+    }
+
+    pi.setThinkingLevel(target.thinkingLevel);
+    if (pi.getThinkingLevel() !== target.thinkingLevel) {
+      await restoreBaseline(pi, run, ctx);
+      notifyRoutingFailure(ctx, `Route Override ${route} thinking level could not be applied`);
+      return;
+    }
+
+    state.activeRoutedRun = run;
+  } catch {
+    await restoreBaseline(pi, run, ctx);
+    notifyRoutingFailure(ctx, `Route Override ${route} could not be applied`);
+  }
 }
 
 function notifyInvalidUsage(ctx: ExtensionCommandContext): void {
@@ -116,7 +228,9 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
   }
 
   if (tokens[0] === "route" && tokens.length === 2 && tokens[1] === "clear") {
-    ctx.ui.notify("No pending Route Override", "info");
+    const hadPendingOverride = state.pendingRouteOverride !== undefined;
+    state.pendingRouteOverride = undefined;
+    ctx.ui.notify(hadPendingOverride ? "Pending Route Override cleared" : "No pending Route Override", "info");
     return;
   }
 
@@ -126,7 +240,8 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
       return;
     }
 
-    ctx.ui.notify("Route Overrides are unavailable until Routed Run support is loaded", "warning");
+    state.pendingRouteOverride = tokens[1] as Route;
+    ctx.ui.notify(`Next Routed Run will use the ${state.pendingRouteOverride} Route Override`, "info");
     return;
   }
 
@@ -137,11 +252,36 @@ export default function helmExtension(pi: ExtensionAPI): void {
   const state: HelmState = {
     configuration: initialConfiguration(),
     automaticRoutingOverride: undefined,
+    pendingRouteOverride: undefined,
+    activeRoutedRun: undefined,
+    pendingBaselineRestoration: undefined,
   };
 
   pi.on("session_start", async () => {
     state.configuration = await loadHelmConfig();
     state.automaticRoutingOverride = undefined;
+    state.pendingRouteOverride = undefined;
+    state.activeRoutedRun = undefined;
+    state.pendingBaselineRestoration = undefined;
+  });
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    if (state.activeRoutedRun) return;
+    if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
+    if (!state.pendingRouteOverride) return;
+
+    const route = state.pendingRouteOverride;
+    state.pendingRouteOverride = undefined;
+    await beginRouteOverride(pi, route, ctx, state);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    await finishRoutedRun(pi, state, ctx, true);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    state.pendingRouteOverride = undefined;
+    await finishRoutedRun(pi, state, ctx, false);
   });
 
   pi.registerCommand("helm", {

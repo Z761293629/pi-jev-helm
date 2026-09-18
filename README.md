@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension and strict V1 configuration foundation are implemented. Routed Run model switching and Jev classification remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
+> **Status:** The loadable extension, strict V1 configuration, and one-shot Route Override lifecycle are implemented. Automatic Jev classification and the remaining Routed Run controls remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
 
 ## How V1 works
 
@@ -46,7 +46,7 @@ V1 command grammar:
 /helm why
 ```
 
-The current foundation implements configuration health and the instance-local Automatic Routing control. Route Override execution and Routing Explanations are added by later V1 stages; until then those commands remain fail-open and do not change the Baseline Model.
+The current implementation includes configuration health, instance-local Automatic Routing control, and one-shot Route Overrides. An override resolves its configured Route Target exactly, applies it before the first Turn, keeps it for the full Routed Run, and restores the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Routing Explanations and automatic classification are added by later V1 stages.
 
 ## Configuration
 
