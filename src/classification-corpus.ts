@@ -69,8 +69,6 @@ function isCompleteBooleanVector(
   );
 }
 
-type BooleanVector = ClassificationBooleanVector;
-
 /** The 24 canonical messages from the accepted Task Classification contract (#7). */
 export const CLASSIFICATION_CORPUS: readonly ClassificationCorpusEntry[] = [
   {
@@ -264,14 +262,18 @@ export function classificationCorpusContentDigest(
   return digest.digest("hex");
 }
 
-/** The content digest of the shipped corpus; pinned by the deterministic tests. */
-export const CLASSIFICATION_CORPUS_CONTENT_DIGEST = classificationCorpusContentDigest();
+/**
+ * Pinned digest of the shipped corpus. Changing corpus content in place makes
+ * the real gate refuse to run until a new corpus version and digest are recorded.
+ */
+export const CLASSIFICATION_CORPUS_CONTENT_DIGEST =
+  "d08d16ccaddfcbaebe193c84e810ac42418416da1acd321b0eab4c653611edfe";
 
 /** The version binding asserted before any corpus rerun or real gate execution. */
 export const CLASSIFICATION_CORPUS_MANIFEST: ClassificationCorpusManifest = {
   corpusId: CLASSIFICATION_CORPUS_ID,
   templateVersion: CLASSIFICATION_TEMPLATE_VERSION,
-  messageCount: CLASSIFICATION_CORPUS.length,
+  messageCount: CLASSIFICATION_CORPUS_SIZE,
   contentDigest: CLASSIFICATION_CORPUS_CONTENT_DIGEST,
 };
 

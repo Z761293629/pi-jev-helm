@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   completeRoutes,
   createDecisionsResponse,
+  deferred,
   restoreAgentDirectory,
 } from "./fixtures.js";
 import { createHarness, writeHelmConfig, type FakeSessionEntry } from "./harness.js";
@@ -262,8 +263,100 @@ describe("Pi Jev Helm routing explanations", () => {
         failOpen: { reason: "target-unavailable", baselineRetained: true },
         restorationRequired: true,
       },
+      expect.objectContaining({ kind: "restoration", outcome: "restored" }),
     ]);
     expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
+
+    await harness.command("why");
+    expect(harness.notices.at(-1)?.message).toContain("Restoration: restored to");
+  });
+
+  it("records explicit overrides while Route Target application is pending", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: false });
+    const targetApplicationStarted = deferred<void>();
+    const releaseTargetApplication = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "anthropic/coding/model": async () => {
+          targetApplicationStarted.resolve(undefined);
+          await releaseTargetApplication.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    const routing = harness.emit("before_agent_start", { prompt: "implement this" });
+    await targetApplicationStarted.promise;
+    await harness.selectThinkingLevel("xhigh");
+    await harness.selectModel(undefined, "xhigh");
+    releaseTargetApplication.resolve(undefined);
+    await routing;
+
+    const entries = explanationEntries(harness.sessionEntries) as Array<{
+      kind?: string;
+      [key: string]: unknown;
+    }>;
+    const attempt = entries.find((entry) => entry.kind === "routing-attempt");
+    expect(attempt).toMatchObject({
+      kind: "routing-attempt",
+      outcome: "fail-open",
+      failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: true },
+    });
+    expect(entries.filter((entry) => entry.kind === "explicit-override")).toEqual([
+      expect.objectContaining({
+        override: { kind: "thinking", thinkingLevel: "xhigh" },
+      }),
+      expect.objectContaining({
+        override: {
+          kind: "model",
+          model: { provider: "user-provider", model: "user-model" },
+          thinkingLevel: "xhigh",
+        },
+      }),
+    ]);
+    expect(entries.at(-1)).toMatchObject({ kind: "restoration", outcome: "restored" });
+
+    await harness.command("why");
+    expect(harness.notices.at(-1)?.message).toContain("thinking → xhigh");
+    expect(harness.notices.at(-1)?.message).toContain("model → user-provider/user-model");
+    expect(harness.notices.at(-1)?.message).toContain("Restoration: restored to");
+  });
+
+  it("records an Explicit Thinking Override while restoration is pending", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: false });
+    const restorationStarted = deferred<void>();
+    const releaseRestoration = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "baseline-provider/baseline-model": async () => {
+          restorationStarted.resolve(undefined);
+          await releaseRestoration.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    const settlement = harness.emit("agent_settled");
+    await restorationStarted.promise;
+    await harness.selectThinkingLevel("xhigh");
+    releaseRestoration.resolve(undefined);
+    await settlement;
+
+    expect(explanationEntries(harness.sessionEntries)).toEqual([
+      expect.objectContaining({ kind: "routing-attempt", outcome: "routed" }),
+      expect.objectContaining({
+        kind: "explicit-override",
+        override: { kind: "thinking", thinkingLevel: "xhigh" },
+      }),
+      expect.objectContaining({
+        kind: "restoration",
+        outcome: "restored",
+        baseline: expect.objectContaining({ thinkingLevel: "xhigh" }),
+      }),
+    ]);
   });
 
   it("records an Explicit Model Override with a superseded restoration during a Routed Run", async () => {

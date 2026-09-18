@@ -188,21 +188,19 @@ interface BranchEntry {
 export function selectBranchRoutingExplanation(
   branch: readonly BranchEntry[],
 ): SelectedRoutingExplanation | undefined {
-  let attemptIndex = -1;
   let attempt: RoutingAttemptExplanation | undefined;
   for (let index = branch.length - 1; index >= 0; index -= 1) {
     const entry = branch[index];
     if (entry?.type !== "custom" || entry.customType !== ROUTING_EXPLANATION_ENTRY_TYPE) continue;
     if (!isRoutingExplanationEntry(entry.data) || entry.data.kind !== "routing-attempt") continue;
-    attemptIndex = index;
     attempt = entry.data;
     break;
   }
-  if (!attempt || attemptIndex === -1) return undefined;
+  if (!attempt) return undefined;
 
   const overrides: ExplicitOverrideExplanation[] = [];
   let restoration: RestorationExplanation | undefined;
-  for (let index = attemptIndex + 1; index < branch.length; index += 1) {
+  for (let index = 0; index < branch.length; index += 1) {
     const entry = branch[index];
     if (entry?.type !== "custom" || entry.customType !== ROUTING_EXPLANATION_ENTRY_TYPE) continue;
     if (!isRoutingExplanationEntry(entry.data) || entry.data.runId !== attempt.runId) continue;

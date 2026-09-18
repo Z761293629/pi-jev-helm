@@ -513,6 +513,7 @@ describe("Pi Jev Helm extension", () => {
           baselineRetained: true,
         }),
       }),
+      expect.objectContaining({ kind: "restoration", outcome: "restored" }),
     ]);
   });
 

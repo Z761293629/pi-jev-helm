@@ -239,6 +239,20 @@ function trackedBaselineRef(run: TrackedBaseline): ExplainedModelWithThinking {
   };
 }
 
+function recordRestorationExplanation(
+  pi: ExtensionAPI,
+  run: TrackedBaseline,
+  restored: boolean,
+): void {
+  recordRoutingExplanation(pi, {
+    schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+    kind: "restoration",
+    runId: run.checkpointId,
+    outcome: restored ? "restored" : "failed",
+    ...(restored ? { baseline: trackedBaselineRef(run) } : {}),
+  });
+}
+
 function recordAttemptExplanation(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
@@ -476,13 +490,7 @@ async function restoreTrackedBaseline(
     }
   }
   if (options.recordRestorationEntry) {
-    recordRoutingExplanation(pi, {
-      schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
-      kind: "restoration",
-      runId: run.checkpointId,
-      outcome: restored ? "restored" : "failed",
-      ...(restored ? { baseline: trackedBaselineRef(run) } : {}),
-    });
+    recordRestorationExplanation(pi, run, restored);
   }
   if (restored || (!options.retainFailedRestoration && checkpointRecorded)) {
     if (state.pendingBaselineRestoration === run) state.pendingBaselineRestoration = undefined;
@@ -564,6 +572,7 @@ async function failAfterRouteTargetApplication(
     failOpen: { reason, baselineRetained: restored },
     restorationRequired: true,
   });
+  recordRestorationExplanation(pi, run, restored);
   notifyRoutingFailure(ctx, message);
 }
 
@@ -684,6 +693,7 @@ async function beginRoutedRun(
         failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: restored },
         restorationRequired: true,
       });
+      recordRestorationExplanation(pi, run, restored);
       return;
     }
     if (!modelSelected) {
@@ -1022,19 +1032,19 @@ export default function helmExtension(pi: ExtensionAPI): void {
           state.pendingBaselineRestoration = run;
         }
       }
+      const baseline = trackedBaselineRef(run);
+      recordRoutingExplanation(pi, {
+        schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+        kind: "explicit-override",
+        runId: run.checkpointId,
+        override: {
+          kind: "model",
+          model: { provider: event.model.provider, model: event.model.id },
+          thinkingLevel: pi.getThinkingLevel(),
+        },
+        baseline,
+      });
       if (completedByExplicitOverride) {
-        const baseline = trackedBaselineRef(run);
-        recordRoutingExplanation(pi, {
-          schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
-          kind: "explicit-override",
-          runId: run.checkpointId,
-          override: {
-            kind: "model",
-            model: { provider: event.model.provider, model: event.model.id },
-            thinkingLevel: pi.getThinkingLevel(),
-          },
-          baseline,
-        });
         recordRoutingExplanation(pi, {
           schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
           kind: "restoration",
@@ -1088,15 +1098,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
       } catch {
         notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
       }
-      if (state.activeRoutedRun === run) {
-        recordRoutingExplanation(pi, {
-          schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
-          kind: "explicit-override",
-          runId: run.checkpointId,
-          override: { kind: "thinking", thinkingLevel: event.level },
-          baseline: trackedBaselineRef(run),
-        });
-      }
+      recordRoutingExplanation(pi, {
+        schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+        kind: "explicit-override",
+        runId: run.checkpointId,
+        override: { kind: "thinking", thinkingLevel: event.level },
+        baseline: trackedBaselineRef(run),
+      });
       return;
     }
 

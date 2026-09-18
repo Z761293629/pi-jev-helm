@@ -15,6 +15,7 @@ import {
   CLASSIFICATION_CORPUS_CONTENT_DIGEST,
   CLASSIFICATION_CORPUS_ID,
   CLASSIFICATION_CORPUS_MANIFEST,
+  classificationCorpusContentDigest,
   classificationMatchesExpected,
   validateClassificationCorpus,
   type ClassificationBooleanVector,
@@ -37,6 +38,7 @@ describe("classification-v1 corpus", () => {
     expect(CLASSIFICATION_CORPUS_CONTENT_DIGEST).toBe(
       "d08d16ccaddfcbaebe193c84e810ac42418416da1acd321b0eab4c653611edfe",
     );
+    expect(classificationCorpusContentDigest()).toBe(CLASSIFICATION_CORPUS_CONTENT_DIGEST);
     expect(CLASSIFICATION_CORPUS_MANIFEST).toEqual({
       corpusId: "classification-v1",
       templateVersion: CLASSIFICATION_TEMPLATE_VERSION,
