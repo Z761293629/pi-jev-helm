@@ -1,3 +1,8 @@
+import type {
+  CapabilitySignalName,
+  TaskClassificationV1,
+} from "../src/classification-provider.js";
+
 export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((complete) => {
@@ -12,6 +17,20 @@ export const completeRoutes = {
   reasoning: { provider: "openai", model: "reasoning/model", thinkingLevel: "xhigh" },
   research: { provider: "google", model: "research/model", thinkingLevel: "medium" },
 };
+
+export function createTaskClassification(
+  values: Record<CapabilitySignalName, boolean>,
+  confidence = 0.9,
+): TaskClassificationV1 {
+  return {
+    schemaVersion: 1,
+    signals: {
+      codeWork: { value: values.codeWork, confidence },
+      deepReasoning: { value: values.deepReasoning, confidence },
+      externalResearch: { value: values.externalResearch, confidence },
+    },
+  };
+}
 
 export function createDecisionsResponse(probabilities: {
   codeWork: number;

@@ -14,7 +14,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:real-jev-gate": "vitest run --config vitest.real-jev-gate.config.ts"
   },
   "pi": {
     "extensions": [

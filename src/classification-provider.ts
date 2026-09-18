@@ -1,4 +1,5 @@
 export const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
+export const CLASSIFICATION_TEMPLATE_VERSION = "classification-v1";
 export const CLASSIFICATION_MODEL = "typesafe/jev-1.13";
 export const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 2500;
 

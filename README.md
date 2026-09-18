@@ -104,6 +104,26 @@ npm run build
 npm test
 ```
 
+### Real Jev compatibility gate
+
+The versioned `classification-v1` corpus (24 canonical messages in
+`src/classification-corpus.ts`) is protected by deterministic tests that run in
+default CI. The real OpenRouter/Jev compatibility gate reclassifies every
+corpus message against the live service with fixed model `typesafe/jev-1.13`,
+confidence threshold `0.75`, three independent executions per message, and a
+per-message two-of-three pass rule. It performs paid external requests, is
+never run by default CI or `npm test`, and fails clearly when credentials are
+missing:
+
+```bash
+OPENROUTER_API_KEY=... npm run test:real-jev-gate
+```
+
+Run the gate before a release and whenever validating a Jev model or
+classification-template change. Any substantive change to the
+`classification-v1` template requires a new template version plus a complete
+corpus rerun; the gate refuses to start otherwise.
+
 Load the extension directly during development:
 
 ```bash
@@ -189,9 +209,9 @@ A later, separately specified capability may evaluate completion evidence, test 
 
 V1 uses three evidence layers:
 
-1. Deterministic schema, policy, configuration, command, privacy, and Provider contract tests.
+1. Deterministic schema, policy, configuration, command, privacy, and Provider contract tests, including the versioned `classification-v1` corpus (24 messages: every Boolean Capability Signal combination twice plus the semantic boundaries — verbosity is not Deep Reasoning, software discussion is not Code Work, local repository exploration is not External Research, ambiguous prompts fail open on low confidence).
 2. Black-box Pi public-extension-API tests with in-process fake models.
-3. An explicitly invoked, credentialed real OpenRouter/Jev compatibility gate.
+3. An explicitly invoked, credentialed real OpenRouter/Jev compatibility gate (`npm run test:real-jev-gate`), evaluated per message with a two-of-three rule so no aggregate pass rate can hide a consistently failing example.
 
 External probabilistic calls are excluded from default CI. The Pi lifecycle suite must cover version 0.85.1 and the newest intended compatible version.
 
