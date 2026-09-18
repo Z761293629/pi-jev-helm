@@ -186,7 +186,11 @@ function safeUpstreamCode(
   ) {
     return code;
   }
-  return typeof code === "number" && Number.isSafeInteger(code) ? code : undefined;
+  return typeof code === "number" &&
+    Number.isSafeInteger(code) &&
+    !exposesSensitiveValue(String(code), sensitiveValues)
+    ? code
+    : undefined;
 }
 
 function safeRetryAfterMs(headers: Headers): number | undefined {

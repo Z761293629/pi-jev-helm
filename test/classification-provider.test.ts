@@ -525,6 +525,29 @@ describe("OpenRouter Jev Classification Provider", () => {
     expect(JSON.stringify(result)).not.toContain("private_user_message");
   });
 
+  it.each([
+    ["12345678", "unrelated prompt", 12345678],
+    ["unrelated-key", "87654321", 87654321],
+  ])("drops numeric metadata that reflects sensitive input", async (apiKey, prompt, code) => {
+    const classificationProvider = new OpenRouterJevClassificationProvider({
+      apiKey,
+      fetch: async () =>
+        new Response(JSON.stringify({ error: { code } }), { status: 500 }),
+    });
+
+    const result = await classificationProvider.classify(prompt);
+
+    expect(result).toEqual({
+      ok: false,
+      failure: {
+        kind: "upstream",
+        summary: "Classification upstream service failed",
+        status: 500,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(String(code));
+  });
+
   it("drops malformed metadata rather than returning possible upstream text", async () => {
     const classificationProvider = new OpenRouterJevClassificationProvider({
       apiKey: "secret-key",
