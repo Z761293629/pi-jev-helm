@@ -753,6 +753,8 @@ describe("Pi Jev Helm extension", () => {
     const releaseTargetApplication = deferred<void>();
     const compensationStarted = deferred<void>();
     const releaseCompensation = deferred<void>();
+    const retryStarted = deferred<void>();
+    const releaseRetry = deferred<void>();
     const harness = createHarness("tui", {
       beforeModelApplication: {
         "anthropic/coding/model": async () => {
@@ -762,6 +764,10 @@ describe("Pi Jev Helm extension", () => {
         "user-provider/user-model": async () => {
           compensationStarted.resolve(undefined);
           await releaseCompensation.promise;
+        },
+        "newer-provider/newer-model": async () => {
+          retryStarted.resolve(undefined);
+          await releaseRetry.promise;
         },
       },
     });
@@ -775,15 +781,37 @@ describe("Pi Jev Helm extension", () => {
     await compensationStarted.promise;
     await harness.selectModel({ provider: "newer-provider", id: "newer-model" }, "high");
     releaseCompensation.resolve(undefined);
+    await retryStarted.promise;
+    await harness.selectModel({ provider: "latest-provider", id: "latest-model" }, "xhigh");
+    releaseRetry.resolve(undefined);
     await routing;
 
-    expect(harness.currentModel).toMatchObject({ provider: "newer-provider", id: "newer-model" });
-    expect(harness.thinkingLevel).toBe("high");
+    expect(harness.currentModel).toMatchObject({ provider: "latest-provider", id: "latest-model" });
+    expect(harness.thinkingLevel).toBe("xhigh");
     expect(harness.modelChanges).toEqual([
       "anthropic/coding/model",
       "user-provider/user-model",
       "newer-provider/newer-model",
+      "latest-provider/latest-model",
     ]);
+  });
+
+  it("recognizes a nested external selection triggered by Helm's model_select event", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness();
+    const handlers = harness.events.get("model_select");
+    handlers?.push(async (event) => {
+      const selectedModel = (event as unknown as { model: FakeModel }).model;
+      if (modelKey(selectedModel) === "anthropic/coding/model") await harness.selectModel();
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+    await harness.emit("agent_settled");
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
   });
 
   it("restores an Explicit Thinking Override that arrives while Route Target application is pending", async () => {

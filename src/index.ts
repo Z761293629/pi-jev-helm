@@ -29,6 +29,16 @@ type RouteTargetAttempt = {
   cancellationRevision: number;
 };
 
+type HelmModelSelectionOperation = {
+  thinkingClampPending: boolean;
+};
+
+type HelmThinkingSelectionOperation = Record<never, never>;
+
+const helmSelectionOperation = new AsyncLocalStorage<
+  HelmModelSelectionOperation | HelmThinkingSelectionOperation
+>();
+
 interface HelmState {
   configuration: ConfigLoadResult;
   automaticRoutingOverride: boolean | undefined;
@@ -39,9 +49,9 @@ interface HelmState {
   pendingRouteTargetApplication: ActiveRoutedRun | undefined;
   pendingBaselineRestoration: ActiveRoutedRun | undefined;
   routeTargetApplicationRevision: number;
+  helmModelSelection: HelmModelSelectionOperation | undefined;
+  helmThinkingSelection: HelmThinkingSelectionOperation | undefined;
 }
-
-const helmSelectionOperation = new AsyncLocalStorage<HelmState>();
 
 function initialConfiguration(): ConfigLoadResult {
   return {
@@ -144,7 +154,13 @@ async function selectModelFromHelm(
   state: HelmState,
   model: PiModel,
 ): Promise<boolean> {
-  return helmSelectionOperation.run(state, () => pi.setModel(model));
+  const operation: HelmModelSelectionOperation = { thinkingClampPending: true };
+  state.helmModelSelection = operation;
+  try {
+    return await helmSelectionOperation.run(operation, () => pi.setModel(model));
+  } finally {
+    if (state.helmModelSelection === operation) state.helmModelSelection = undefined;
+  }
 }
 
 function selectThinkingLevelFromHelm(
@@ -152,7 +168,13 @@ function selectThinkingLevelFromHelm(
   state: HelmState,
   level: ReturnType<ExtensionAPI["getThinkingLevel"]>,
 ): void {
-  helmSelectionOperation.run(state, () => pi.setThinkingLevel(level));
+  const operation: HelmThinkingSelectionOperation = {};
+  state.helmThinkingSelection = operation;
+  try {
+    helmSelectionOperation.run(operation, () => pi.setThinkingLevel(level));
+  } finally {
+    if (state.helmThinkingSelection === operation) state.helmThinkingSelection = undefined;
+  }
 }
 
 async function restoreBaseline(
@@ -162,6 +184,7 @@ async function restoreBaseline(
   state: HelmState,
 ): Promise<boolean> {
   for (;;) {
+    state.pendingBaselineRestoration = run;
     const restorationRevision = state.routeTargetApplicationRevision;
     const baselineModel = run.baselineModel;
     let modelRestored = false;
@@ -437,6 +460,8 @@ export default function helmExtension(pi: ExtensionAPI): void {
     pendingRouteTargetApplication: undefined,
     pendingBaselineRestoration: undefined,
     routeTargetApplicationRevision: 0,
+    helmModelSelection: undefined,
+    helmThinkingSelection: undefined,
   };
 
   pi.on("session_start", async () => {
@@ -449,10 +474,16 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.pendingRouteTargetApplication = undefined;
     state.pendingBaselineRestoration = undefined;
     state.routeTargetApplicationRevision = 0;
+    state.helmModelSelection = undefined;
+    state.helmThinkingSelection = undefined;
   });
 
   pi.on("model_select", (event) => {
-    if (helmSelectionOperation.getStore() === state) return;
+    const helmSelection = state.helmModelSelection;
+    if (helmSelection && helmSelectionOperation.getStore() === helmSelection) {
+      state.helmModelSelection = undefined;
+      return;
+    }
 
     state.routeTargetApplicationRevision += 1;
     const run =
@@ -469,7 +500,22 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("thinking_level_select", (event) => {
-    if (helmSelectionOperation.getStore() === state) return;
+    const helmThinkingSelection = state.helmThinkingSelection;
+    if (
+      helmThinkingSelection &&
+      helmSelectionOperation.getStore() === helmThinkingSelection
+    ) {
+      state.helmThinkingSelection = undefined;
+      return;
+    }
+    const helmModelSelection = state.helmModelSelection;
+    if (
+      helmModelSelection?.thinkingClampPending &&
+      helmSelectionOperation.getStore() === helmModelSelection
+    ) {
+      helmModelSelection.thinkingClampPending = false;
+      return;
+    }
 
     state.routeTargetApplicationRevision += 1;
     const run =
