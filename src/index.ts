@@ -115,6 +115,7 @@ interface HelmState {
   activeRoutedRun: ActiveRoutedRun | undefined;
   pendingRouteTargetApplication: ActiveRoutedRun | undefined;
   pendingBaselineRestoration: TrackedBaseline | undefined;
+  explicitlySupersededRun: TrackedBaseline | undefined;
   baselineRestorationInFlight: TrackedBaseline | undefined;
   pendingCheckpointRecovery: BaselineCheckpoint | undefined;
   checkpointRecoverySelectedModel: PiModel | undefined;
@@ -953,6 +954,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     activeRoutedRun: undefined,
     pendingRouteTargetApplication: undefined,
     pendingBaselineRestoration: undefined,
+    explicitlySupersededRun: undefined,
     baselineRestorationInFlight: undefined,
     pendingCheckpointRecovery: undefined,
     checkpointRecoverySelectedModel: undefined,
@@ -970,6 +972,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.activeRoutedRun = undefined;
     state.pendingRouteTargetApplication = undefined;
     state.pendingBaselineRestoration = undefined;
+    state.explicitlySupersededRun = undefined;
     state.baselineRestorationInFlight = undefined;
     state.pendingCheckpointRecovery = undefined;
     state.checkpointRecoverySelectedModel = undefined;
@@ -999,7 +1002,8 @@ export default function helmExtension(pi: ExtensionAPI): void {
     let run: TrackedBaseline | undefined =
       state.pendingRouteTargetApplication ??
       state.activeRoutedRun ??
-      state.pendingBaselineRestoration;
+      state.pendingBaselineRestoration ??
+      state.explicitlySupersededRun;
     const recoveryCheckpoint = run ? undefined : state.pendingCheckpointRecovery;
     const recoveryOverride = recoveryCheckpoint !== undefined;
     if (recoveryCheckpoint) {
@@ -1011,10 +1015,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
       };
       state.pendingCheckpointRecovery = checkpointData(run, "pending");
     }
+    const supersededActiveRun = !!run && state.activeRoutedRun === run;
+    const alreadySuperseded = !!run && state.explicitlySupersededRun === run;
     const completedByExplicitOverride =
       !!run &&
       (recoveryOverride ||
-        state.activeRoutedRun === run ||
+        supersededActiveRun ||
+        alreadySuperseded ||
         (state.pendingBaselineRestoration === run && state.baselineRestorationInFlight !== run));
     let checkpointCompleted = false;
     if (run) {
@@ -1044,7 +1051,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
         },
         baseline,
       });
-      if (completedByExplicitOverride) {
+      if (completedByExplicitOverride && !alreadySuperseded) {
         recordRoutingExplanation(pi, {
           schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
           kind: "restoration",
@@ -1053,6 +1060,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
           baseline,
         });
       }
+      if (supersededActiveRun) state.explicitlySupersededRun = run;
     }
 
     state.activeRoutedRun = undefined;
@@ -1087,14 +1095,19 @@ export default function helmExtension(pi: ExtensionAPI): void {
     const run =
       state.activeRoutedRun ??
       state.pendingRouteTargetApplication ??
-      state.pendingBaselineRestoration;
+      state.pendingBaselineRestoration ??
+      state.explicitlySupersededRun;
     if (run) {
       if (ctx.model && !isExactModel(ctx.model, run.helmSelectedModel.provider, run.helmSelectedModel.id)) {
         run.baselineModel = ctx.model;
       }
       run.baselineThinkingLevel = event.level;
       try {
-        appendCheckpoint(pi, run, "pending");
+        appendCheckpoint(
+          pi,
+          run,
+          state.explicitlySupersededRun === run ? "complete" : "pending",
+        );
       } catch {
         notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
       }
@@ -1175,6 +1188,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", async (_event, ctx) => {
     await finishRoutedRun(pi, state, ctx, true);
+    state.explicitlySupersededRun = undefined;
     state.routingAttemptedForCurrentRun = false;
   });
 
@@ -1182,6 +1196,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.pendingRouteOverride = undefined;
     state.pendingIdleUserMessage = undefined;
     state.routingAttemptedForCurrentRun = false;
+    state.explicitlySupersededRun = undefined;
     state.routeTargetApplicationRevision += 1;
     const pendingApplication = state.pendingRouteTargetApplication;
     state.pendingRouteTargetApplication = undefined;

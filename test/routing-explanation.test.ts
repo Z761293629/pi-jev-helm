@@ -414,6 +414,50 @@ describe("Pi Jev Helm routing explanations", () => {
     expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
   });
 
+  it("records a Thinking Override selected after a Model Override in the same Routed Run", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    await harness.selectModel(undefined, "high");
+    await harness.selectThinkingLevel("xhigh");
+    await harness.emit("agent_settled");
+
+    const entries = explanationEntries(harness.sessionEntries) as Array<{
+      kind?: string;
+      override?: unknown;
+    }>;
+    expect(entries.filter((entry) => entry.kind === "explicit-override")).toEqual([
+      expect.objectContaining({
+        override: {
+          kind: "model",
+          model: { provider: "user-provider", model: "user-model" },
+          thinkingLevel: "high",
+        },
+      }),
+      expect.objectContaining({
+        override: { kind: "thinking", thinkingLevel: "xhigh" },
+      }),
+    ]);
+    expect(checkpointEntries(harness.sessionEntries).at(-1)).toMatchObject({
+      status: "complete",
+      baseline: {
+        provider: "user-provider",
+        model: "user-model",
+        thinkingLevel: "xhigh",
+      },
+    });
+
+    await harness.command("why");
+    expect(harness.notices.at(-1)?.message).toContain(
+      "model → user-provider/user-model (thinking high); thinking → xhigh",
+    );
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("xhigh");
+  });
+
   it("records an Explicit Thinking Override during a Routed Run", async () => {
     await writeHelmConfig(agentDir, { automaticRouting: false });
     const harness = createHarness();
