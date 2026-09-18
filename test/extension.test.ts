@@ -604,6 +604,37 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.modelChanges).toEqual(["anthropic/coding/model"]);
   });
 
+  it("preserves an Explicit Model Override that arrives during settlement restoration", async () => {
+    await writeConfig({ automaticRouting: false });
+    const restorationStarted = deferred<void>();
+    const releaseRestoration = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "baseline-provider/baseline-model": async () => {
+          restorationStarted.resolve(undefined);
+          await releaseRestoration.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+
+    const settlement = harness.emit("agent_settled");
+    await restorationStarted.promise;
+    await harness.selectModel();
+    releaseRestoration.resolve(undefined);
+    await settlement;
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "baseline-provider/baseline-model",
+      "user-provider/user-model",
+    ]);
+  });
+
   it("does not treat Helm's model clamping as an Explicit Thinking Override", async () => {
     await writeConfig({ automaticRouting: false });
     const harness = createHarness("tui", {
@@ -707,6 +738,51 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.modelChanges).toEqual([
       "anthropic/coding/model",
       "user-provider/user-model",
+    ]);
+  });
+
+  it("preserves the latest Explicit Model Override when another selection arrives during compensation", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+    const targetApplicationStarted = deferred<void>();
+    const releaseTargetApplication = deferred<void>();
+    const compensationStarted = deferred<void>();
+    const releaseCompensation = deferred<void>();
+    const harness = createHarness("tui", {
+      beforeModelApplication: {
+        "anthropic/coding/model": async () => {
+          targetApplicationStarted.resolve(undefined);
+          await releaseTargetApplication.promise;
+        },
+        "user-provider/user-model": async () => {
+          compensationStarted.resolve(undefined);
+          await releaseCompensation.promise;
+        },
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "classify this", source: "interactive" });
+
+    const routing = harness.emit("before_agent_start", { prompt: "classify this" });
+    await targetApplicationStarted.promise;
+    await harness.selectModel();
+    releaseTargetApplication.resolve(undefined);
+    await compensationStarted.promise;
+    await harness.selectModel({ provider: "newer-provider", id: "newer-model" }, "high");
+    releaseCompensation.resolve(undefined);
+    await routing;
+
+    expect(harness.currentModel).toMatchObject({ provider: "newer-provider", id: "newer-model" });
+    expect(harness.thinkingLevel).toBe("high");
+    expect(harness.modelChanges).toEqual([
+      "anthropic/coding/model",
+      "user-provider/user-model",
+      "newer-provider/newer-model",
     ]);
   });
 

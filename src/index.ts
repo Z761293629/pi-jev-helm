@@ -161,31 +161,54 @@ async function restoreBaseline(
   ctx: ExtensionContext,
   state: HelmState,
 ): Promise<boolean> {
-  let modelRestored = false;
-  try {
-    modelRestored =
-      (await selectModelFromHelm(pi, state, run.baselineModel)) &&
-      !!ctx.model &&
-      isExactModel(ctx.model, run.baselineModel.provider, run.baselineModel.id);
-  } catch {
-    modelRestored = false;
-  }
-  if (!modelRestored) {
-    notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline Model");
-  }
+  for (;;) {
+    const restorationRevision = state.routeTargetApplicationRevision;
+    const baselineModel = run.baselineModel;
+    let modelRestored = false;
+    try {
+      modelRestored =
+        (await selectModelFromHelm(pi, state, baselineModel)) &&
+        !!ctx.model &&
+        isExactModel(ctx.model, baselineModel.provider, baselineModel.id);
+    } catch {
+      modelRestored = false;
+    }
+    if (state.routeTargetApplicationRevision !== restorationRevision) continue;
+    if (!modelRestored) {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline Model");
+    }
 
-  let thinkingRestored = false;
-  try {
-    selectThinkingLevelFromHelm(pi, state, run.baselineThinkingLevel);
-    thinkingRestored = true;
-  } catch {
-    thinkingRestored = false;
-  }
-  if (!thinkingRestored) {
-    notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline thinking level");
-  }
+    let thinkingRestored = false;
+    try {
+      selectThinkingLevelFromHelm(pi, state, run.baselineThinkingLevel);
+      thinkingRestored = true;
+    } catch {
+      thinkingRestored = false;
+    }
+    if (state.routeTargetApplicationRevision !== restorationRevision) continue;
+    if (!thinkingRestored) {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline thinking level");
+    }
 
-  return modelRestored && thinkingRestored;
+    return modelRestored && thinkingRestored;
+  }
+}
+
+async function restoreTrackedBaseline(
+  pi: ExtensionAPI,
+  run: ActiveRoutedRun,
+  ctx: ExtensionContext,
+  state: HelmState,
+  retainFailedRestoration: boolean,
+): Promise<boolean> {
+  state.pendingBaselineRestoration = run;
+  const restored = await restoreBaseline(pi, run, ctx, state);
+  if (restored || !retainFailedRestoration) {
+    if (state.pendingBaselineRestoration === run) state.pendingBaselineRestoration = undefined;
+  } else {
+    state.pendingBaselineRestoration = run;
+  }
+  return restored;
 }
 
 async function failAfterRouteTargetApplication(
@@ -196,7 +219,7 @@ async function failAfterRouteTargetApplication(
   message: string,
 ): Promise<void> {
   state.pendingRouteTargetApplication = undefined;
-  if (!(await restoreBaseline(pi, run, ctx, state))) state.pendingBaselineRestoration = run;
+  await restoreTrackedBaseline(pi, run, ctx, state, true);
   notifyRoutingFailure(ctx, message);
 }
 
@@ -208,12 +231,9 @@ async function finishRoutedRun(
 ): Promise<boolean> {
   const run = state.activeRoutedRun ?? state.pendingBaselineRestoration;
   state.activeRoutedRun = undefined;
-  state.pendingBaselineRestoration = undefined;
   if (!run) return true;
 
-  const restored = await restoreBaseline(pi, run, ctx, state);
-  if (!restored && retainFailedRestoration) state.pendingBaselineRestoration = run;
-  return restored;
+  return restoreTrackedBaseline(pi, run, ctx, state, retainFailedRestoration);
 }
 
 async function beginRoutedRun(
@@ -253,7 +273,7 @@ async function beginRoutedRun(
     const modelSelected = await selectModelFromHelm(pi, state, model);
     if (state.routeTargetApplicationRevision !== cancellationRevision) {
       state.pendingRouteTargetApplication = undefined;
-      if (!(await restoreBaseline(pi, run, ctx, state))) state.pendingBaselineRestoration = run;
+      await restoreTrackedBaseline(pi, run, ctx, state, true);
       return;
     }
     if (!modelSelected) {
@@ -435,10 +455,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
     if (helmSelectionOperation.getStore() === state) return;
 
     state.routeTargetApplicationRevision += 1;
-    const applyingRun = state.pendingRouteTargetApplication;
-    if (applyingRun) {
-      applyingRun.baselineModel = event.model;
-      applyingRun.baselineThinkingLevel = pi.getThinkingLevel();
+    const run =
+      state.pendingRouteTargetApplication ??
+      state.activeRoutedRun ??
+      state.pendingBaselineRestoration;
+    if (run) {
+      run.baselineModel = event.model;
+      run.baselineThinkingLevel = pi.getThinkingLevel();
     }
 
     state.activeRoutedRun = undefined;
