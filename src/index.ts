@@ -284,15 +284,20 @@ async function beginAutomaticRouting(
   if (!state.configuration.ok) return;
 
   try {
-    const provider = await createClassificationProvider(ctx);
-    if (!provider) {
+    const classificationProvider = await createClassificationProvider(ctx);
+    if (!classificationProvider) {
       notifyRoutingFailure(ctx, "Automatic Routing could not authenticate the Classification Provider");
       return;
     }
 
-    const result = await provider.classify(prompt);
+    const result = await classificationProvider.classify(
+      prompt,
+      ctx.signal ? { signal: ctx.signal } : undefined,
+    );
     if (!result.ok) {
-      notifyRoutingFailure(ctx, "Automatic Routing classification failed");
+      if (result.failure.kind !== "aborted") {
+        notifyRoutingFailure(ctx, "Automatic Routing classification failed");
+      }
       return;
     }
 

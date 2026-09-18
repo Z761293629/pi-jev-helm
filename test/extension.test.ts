@@ -27,6 +27,7 @@ type HarnessOptions = {
   registryErrors?: string[];
   registryResults?: Record<string, FakeModel | null>;
   scopedModels?: string[];
+  signal?: AbortSignal;
   thinkingLevelByModel?: Record<string, string>;
 };
 
@@ -54,6 +55,7 @@ function createHarness(
     mode,
     hasUI: mode === "tui" || mode === "rpc",
     model: baselineModel as FakeModel | undefined,
+    signal: options.signal,
     scopedModels: (options.scopedModels ?? []).map((key) => ({
       model: models.find((model) => modelKey(model) === key),
     })),
@@ -301,11 +303,146 @@ describe("Pi Jev Helm extension", () => {
 
     expect(transport).toHaveBeenCalledTimes(1);
     expect(harness.modelChanges).toEqual([]);
+    expect(harness.notices).toEqual([]);
 
     await harness.emit("agent_settled");
     await harness.emit("input", { text: "next independent request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "next independent request" });
     expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails open with a safe warning when classification is rejected", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "authentication_failed",
+              message: "account=user-123 key=upstream-secret",
+            },
+          }),
+          { status: 401 },
+        ),
+      ),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.emit("input", { text: "private user message", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "private user message" });
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices).toEqual([
+      { message: "Automatic Routing classification failed", level: "warning" },
+    ]);
+    expect(JSON.stringify(harness.notices)).not.toContain("private user message");
+    expect(JSON.stringify(harness.notices)).not.toContain("user-123");
+    expect(JSON.stringify(harness.notices)).not.toContain("upstream-secret");
+  });
+
+  it("forwards Routed Run cancellation and ends in-flight classification quietly", async () => {
+    await writeConfig({ automaticRouting: true });
+    const controller = new AbortController();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        markStarted();
+        return await new Promise<Response>((resolve) => {
+          controller.signal.addEventListener(
+            "abort",
+            () => resolve(
+              createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+            ),
+            { once: true },
+          );
+        });
+      }),
+    );
+    const harness = createHarness("tui", { signal: controller.signal });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "private user message", source: "interactive" });
+
+    const pendingStart = harness.emit("before_agent_start", { prompt: "private user message" });
+    await started;
+    controller.abort();
+    await pendingStart;
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices).toEqual([]);
+  });
+
+  it("warns when the transport aborts without Routed Run cancellation", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new DOMException("private cancellation reason", "AbortError");
+      }),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.emit("input", { text: "private user message", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "private user message" });
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices).toEqual([
+      { message: "Automatic Routing classification failed", level: "warning" },
+    ]);
+    expect(JSON.stringify(harness.notices)).not.toContain("private cancellation reason");
+  });
+
+  it.each(["rpc", "json", "print"] as const)(
+    "fails open without a notification in %s mode",
+    async (mode) => {
+      await writeConfig({ automaticRouting: true });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response("private malformed response", { status: 200 })),
+      );
+      const harness = createHarness(mode);
+      await harness.emit("session_start", { reason: "startup" });
+
+      await harness.emit("input", { text: "private user message", source: "interactive" });
+      await harness.emit("before_agent_start", { prompt: "private user message" });
+
+      expect(harness.modelChanges).toEqual([]);
+      expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+      expect(harness.notices).toEqual([]);
+    },
+  );
+
+  it("catches unexpected Classification Provider errors at the Routed Run boundary", async () => {
+    await writeConfig({ automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("private programming detail");
+      }),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.emit("input", { text: "private user message", source: "interactive" });
+    await expect(
+      harness.emit("before_agent_start", { prompt: "private user message" }),
+    ).resolves.toBeUndefined();
+
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.currentModel).toMatchObject({ provider: "baseline-provider", id: "baseline-model" });
+    expect(harness.notices).toEqual([
+      { message: "Automatic Routing classification failed", level: "warning" },
+    ]);
+    expect(JSON.stringify(harness.notices)).not.toContain("private programming detail");
   });
 
   it("uses runtime Automatic Routing controls without persisting them", async () => {

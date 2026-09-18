@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, and one-shot Route Override lifecycle are implemented. The remaining fail-open diagnostics and Routed Run controls remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
+> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, and safe typed Classification Provider fail-open handling are implemented. The remaining Routed Run controls and diagnostics remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
 
 ## How V1 works
 
@@ -46,7 +46,7 @@ V1 command grammar:
 /helm why
 ```
 
-The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Routing Explanations and the remaining failure diagnostics are added by later V1 stages.
+The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Classification uses one total 2500 ms attempt, validates the complete success contract, and maps cancellation, transport, HTTP, timeout, and protocol failures to safe typed outcomes before failing open. Routing Explanations and later lifecycle diagnostics are added by subsequent V1 stages.
 
 ## Configuration
 
