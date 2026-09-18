@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** V1 is specified and ticketed, but not yet implemented. See [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12) and its linked sub-issues.
+> **Status:** The loadable extension and strict V1 configuration foundation are implemented. Routed Run model switching and Jev classification remain under development in the child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
 
 ## How V1 works
 
@@ -37,13 +37,68 @@ V1 is intended to provide:
 - `/helm why` for a structured **Routing Explanation** without copied prompts or invented chain of thought.
 - Silent operation in print, JSON, RPC, and other machine-readable modes.
 
-Planned commands:
+V1 command grammar:
 
 ```text
 /helm
 /helm auto on|off
 /helm route fast|coding|reasoning|research|clear
 /helm why
+```
+
+The current foundation implements configuration health and the instance-local Automatic Routing control. Route Override execution and Routing Explanations are added by later V1 stages; until then those commands remain fail-open and do not change the Baseline Model.
+
+## Configuration
+
+Pi Jev Helm reads `pi-jev-helm.json` from the user directory returned by Pi's public `getAgentDir()` API. It reads the file at session startup and `/reload`; it does not watch the file or assume a home-directory path.
+
+```json
+{
+  "schemaVersion": 1,
+  "automaticRouting": true,
+  "confidenceThreshold": 0.75,
+  "routes": {
+    "fast": {
+      "provider": "openrouter",
+      "model": "fast-model-id",
+      "thinkingLevel": "off"
+    },
+    "coding": {
+      "provider": "anthropic",
+      "model": "coding-model-id",
+      "thinkingLevel": "high"
+    },
+    "reasoning": {
+      "provider": "openai",
+      "model": "reasoning-model-id",
+      "thinkingLevel": "high"
+    },
+    "research": {
+      "provider": "google",
+      "model": "research-model-id",
+      "thinkingLevel": "medium"
+    }
+  }
+}
+```
+
+`automaticRouting` defaults to `true`; `confidenceThreshold` defaults to `0.75` and must be finite and within `[0,1]`. Every standard Route requires exactly one complete Route Target. Run `/helm` to inspect configuration health and the effective Automatic Routing state. Invalid configuration disables Automatic Routing without blocking ordinary Pi requests.
+
+## Development
+
+Pi 0.85.1 and Node.js 22.19 or newer are required.
+
+```bash
+npm ci
+npm run typecheck
+npm run build
+npm test
+```
+
+Load the extension directly during development:
+
+```bash
+pi -e ./src/index.ts
 ```
 
 ## Design principles

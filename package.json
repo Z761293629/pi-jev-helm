@@ -1,0 +1,33 @@
+{
+  "name": "pi-jev-helm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fail-open Jev task routing for Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}
