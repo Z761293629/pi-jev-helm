@@ -4,7 +4,12 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
+import {
+  OpenRouterJevClassificationProvider,
+  type ClassificationProvider,
+} from "./classification-provider.js";
 import { loadHelmConfig, type ConfigLoadResult, type Route, ROUTES } from "./config.js";
+import { selectRoute } from "./routing-policy.js";
 
 const HELM_COMMANDS = ["auto", "route"] as const;
 
@@ -20,6 +25,8 @@ interface HelmState {
   configuration: ConfigLoadResult;
   automaticRoutingOverride: boolean | undefined;
   pendingRouteOverride: Route | undefined;
+  pendingIdleUserMessage: string | undefined;
+  helmRoutedRunActive: boolean;
   activeRoutedRun: ActiveRoutedRun | undefined;
   pendingBaselineRestoration: ActiveRoutedRun | undefined;
 }
@@ -77,7 +84,7 @@ function formatStatus(state: HelmState, ctx: ExtensionContext): string {
   return [
     "Pi Jev Helm",
     ...formatConfigurationHealth(state),
-    "Routing capability: Route Override",
+    "Routing capability: Automatic Routing and Route Override",
     `Pending Route Override: ${state.pendingRouteOverride ?? "none"}`,
     `Current or recent Route: ${state.activeRoutedRun?.route ?? "none"}`,
     `Baseline Model: ${baselineModel}`,
@@ -157,15 +164,16 @@ async function finishRoutedRun(
   return restored;
 }
 
-async function beginRouteOverride(
+async function beginRoutedRun(
   pi: ExtensionAPI,
   route: Route,
   ctx: ExtensionContext,
   state: HelmState,
+  source: "Automatic Routing" | "Route Override",
 ): Promise<void> {
   if (!state.configuration.ok) return;
   if (!ctx.model) {
-    notifyRoutingFailure(ctx, `Route Override ${route} could not capture the Baseline Model`);
+    notifyRoutingFailure(ctx, `${source} ${route} could not capture the Baseline Model`);
     return;
   }
 
@@ -177,27 +185,67 @@ async function beginRouteOverride(
   const target = state.configuration.config.routes[route];
   const model = ctx.modelRegistry.find(target.provider, target.model);
   if (!model || !isModelInScope(ctx, model)) {
-    notifyRoutingFailure(ctx, `Route Override ${route} target is unavailable`);
+    notifyRoutingFailure(ctx, `${source} ${route} target is unavailable`);
     return;
   }
 
   try {
     if (!(await pi.setModel(model))) {
-      notifyRoutingFailure(ctx, `Route Override ${route} target is unavailable`);
+      notifyRoutingFailure(ctx, `${source} ${route} target is unavailable`);
       return;
     }
 
     pi.setThinkingLevel(target.thinkingLevel);
     if (pi.getThinkingLevel() !== target.thinkingLevel) {
       await restoreBaseline(pi, run, ctx);
-      notifyRoutingFailure(ctx, `Route Override ${route} thinking level could not be applied`);
+      notifyRoutingFailure(ctx, `${source} ${route} thinking level could not be applied`);
       return;
     }
 
     state.activeRoutedRun = run;
   } catch {
     await restoreBaseline(pi, run, ctx);
-    notifyRoutingFailure(ctx, `Route Override ${route} could not be applied`);
+    notifyRoutingFailure(ctx, `${source} ${route} could not be applied`);
+  }
+}
+
+async function createClassificationProvider(
+  ctx: ExtensionContext,
+): Promise<ClassificationProvider | undefined> {
+  const apiKey = await ctx.modelRegistry.getApiKeyForProvider("openrouter");
+  return apiKey ? new OpenRouterJevClassificationProvider({ apiKey }) : undefined;
+}
+
+async function beginAutomaticRouting(
+  pi: ExtensionAPI,
+  prompt: string,
+  ctx: ExtensionContext,
+  state: HelmState,
+): Promise<void> {
+  if (!state.configuration.ok) return;
+
+  try {
+    const provider = await createClassificationProvider(ctx);
+    if (!provider) {
+      notifyRoutingFailure(ctx, "Automatic Routing could not authenticate the Classification Provider");
+      return;
+    }
+
+    const result = await provider.classify(prompt);
+    if (!result.ok) {
+      notifyRoutingFailure(ctx, "Automatic Routing classification failed");
+      return;
+    }
+
+    const decision = selectRoute(
+      result.classification,
+      state.configuration.config.confidenceThreshold,
+    );
+    if (!decision.ok) return;
+
+    await beginRoutedRun(pi, decision.route, ctx, state, "Automatic Routing");
+  } catch {
+    notifyRoutingFailure(ctx, "Automatic Routing classification failed");
   }
 }
 
@@ -253,6 +301,8 @@ export default function helmExtension(pi: ExtensionAPI): void {
     configuration: initialConfiguration(),
     automaticRoutingOverride: undefined,
     pendingRouteOverride: undefined,
+    pendingIdleUserMessage: undefined,
+    helmRoutedRunActive: false,
     activeRoutedRun: undefined,
     pendingBaselineRestoration: undefined,
   };
@@ -261,26 +311,44 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.configuration = await loadHelmConfig();
     state.automaticRoutingOverride = undefined;
     state.pendingRouteOverride = undefined;
+    state.pendingIdleUserMessage = undefined;
+    state.helmRoutedRunActive = false;
     state.activeRoutedRun = undefined;
     state.pendingBaselineRestoration = undefined;
   });
 
-  pi.on("before_agent_start", async (_event, ctx) => {
-    if (state.activeRoutedRun) return;
-    if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
-    if (!state.pendingRouteOverride) return;
+  pi.on("input", (event) => {
+    if (event.streamingBehavior === undefined) state.pendingIdleUserMessage = event.text;
+  });
 
-    const route = state.pendingRouteOverride;
-    state.pendingRouteOverride = undefined;
-    await beginRouteOverride(pi, route, ctx, state);
+  pi.on("before_agent_start", async (_event, ctx) => {
+    if (state.helmRoutedRunActive) return;
+    const currentUserMessage = state.pendingIdleUserMessage;
+    state.pendingIdleUserMessage = undefined;
+    if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
+
+    if (state.pendingRouteOverride) {
+      state.helmRoutedRunActive = true;
+      const route = state.pendingRouteOverride;
+      state.pendingRouteOverride = undefined;
+      await beginRoutedRun(pi, route, ctx, state, "Route Override");
+      return;
+    }
+
+    if (!effectiveAutomaticRouting(state) || currentUserMessage === undefined) return;
+    state.helmRoutedRunActive = true;
+    await beginAutomaticRouting(pi, currentUserMessage, ctx, state);
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
     await finishRoutedRun(pi, state, ctx, true);
+    state.helmRoutedRunActive = false;
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     state.pendingRouteOverride = undefined;
+    state.pendingIdleUserMessage = undefined;
+    state.helmRoutedRunActive = false;
     await finishRoutedRun(pi, state, ctx, false);
   });
 

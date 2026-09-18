@@ -5,6 +5,27 @@ export const completeRoutes = {
   research: { provider: "google", model: "research/model", thinkingLevel: "medium" },
 };
 
+export function createDecisionsResponse(probabilities: {
+  codeWork: number;
+  deepReasoning: number;
+  externalResearch: number;
+}): Response {
+  return new Response(
+    JSON.stringify({
+      id: "decision-1",
+      model: "typesafe/jev-1.13-20260917",
+      provider: "TypeSafe",
+      answers: {
+        codeWork: { type: "noul", noul: probabilities.codeWork },
+        deepReasoning: { type: "noul", noul: probabilities.deepReasoning },
+        externalResearch: { type: "noul", noul: probabilities.externalResearch },
+      },
+      usage: { input_tokens: 123, output_tokens: 45, cost: 0.0001 },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 export function restoreAgentDirectory(originalAgentDir: string | undefined): void {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;

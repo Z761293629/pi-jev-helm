@@ -6,10 +6,10 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import helmExtension from "../src/index.js";
-import { completeRoutes, restoreAgentDirectory } from "./fixtures.js";
+import { completeRoutes, createDecisionsResponse, restoreAgentDirectory } from "./fixtures.js";
 
 type EventHandler = (event: never, ctx: ExtensionContext) => Promise<unknown> | unknown;
 type HelmCommand = {
@@ -56,6 +56,9 @@ function createHarness(
     modelRegistry: {
       find(provider: string, id: string) {
         return models.find((model) => model.provider === provider && model.id === id);
+      },
+      async getApiKeyForProvider(provider: string) {
+        return provider === "openrouter" ? "test-openrouter-key" : undefined;
       },
     },
     ui: {
@@ -131,6 +134,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   restoreAgentDirectory(originalAgentDir);
+  vi.unstubAllGlobals();
 });
 
 async function writeConfig(overrides: Record<string, unknown> = {}): Promise<void> {
@@ -187,6 +191,7 @@ describe("Pi Jev Helm extension", () => {
 
     await harness.emit("session_start", { reason: "startup" });
 
+    await harness.emit("input", { text: "ordinary request", source: "interactive" });
     await harness.emit("before_agent_start", { prompt: "ordinary request" });
     await harness.emit("agent_settled");
 
@@ -194,6 +199,115 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.thinkingLevelChanges).toEqual([]);
     expect(harness.notices).toEqual([]);
     expect(harness.commands.has("helm")).toBe(true);
+  });
+
+  it.each([
+    [{ codeWork: 0.1, deepReasoning: 0.1, externalResearch: 0.1 }, "openrouter/fast/model"],
+    [{ codeWork: 0.1, deepReasoning: 0.9, externalResearch: 0.1 }, "openai/reasoning/model"],
+    [{ codeWork: 0.9, deepReasoning: 0.9, externalResearch: 0.1 }, "anthropic/coding/model"],
+    [{ codeWork: 0.9, deepReasoning: 0.9, externalResearch: 0.9 }, "google/research/model"],
+  ] as const)(
+    "automatically applies the configured Route Target for classification %j",
+    async (probabilities, expectedModel) => {
+      await writeConfig({ automaticRouting: true });
+      const transport = vi.fn(async () => createDecisionsResponse(probabilities));
+      vi.stubGlobal("fetch", transport);
+      const harness = createHarness();
+      await harness.emit("session_start", { reason: "startup" });
+
+      await harness.emit("input", { text: "classify this exact request", source: "interactive" });
+      await harness.emit("before_agent_start", { prompt: "classify this exact request" });
+
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(harness.currentModel && modelKey(harness.currentModel)).toBe(expectedModel);
+    },
+  );
+
+  it("classifies the unexpanded current user message", async () => {
+    await writeConfig({ automaticRouting: true });
+    const transport = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+      createDecisionsResponse({ codeWork: 0.1, deepReasoning: 0.1, externalResearch: 0.9 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    const currentUserMessage = "/skill:research current OpenRouter docs";
+    await harness.emit("input", {
+      text: currentUserMessage,
+      source: "interactive",
+      streamingBehavior: undefined,
+    });
+    await harness.emit("before_agent_start", {
+      prompt: "<expanded research skill> current OpenRouter docs",
+    });
+
+    const request = transport.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(JSON.parse(String(request?.body))).toMatchObject({ state: currentUserMessage });
+  });
+
+  it("classifies only the initial message of a Routed Run, including after low-confidence fail-open", async () => {
+    await writeConfig({ automaticRouting: true, confidenceThreshold: 0.75 });
+    const transport = vi.fn(async () =>
+      createDecisionsResponse({ codeWork: 0.49, deepReasoning: 0.49, externalResearch: 0.49 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.emit("input", { text: "initial message", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "initial message" });
+    await harness.emit("input", {
+      text: "queued continuation",
+      source: "interactive",
+      streamingBehavior: "followUp",
+    });
+    await harness.emit("before_agent_start", { prompt: "queued continuation" });
+
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(harness.modelChanges).toEqual([]);
+
+    await harness.emit("agent_settled");
+    await harness.emit("input", { text: "next independent request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "next independent request" });
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses runtime Automatic Routing controls without persisting them", async () => {
+    await writeConfig({ automaticRouting: true });
+    const transport = vi.fn(async () =>
+      createDecisionsResponse({ codeWork: 0.1, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    await harness.command("auto off");
+    await harness.emit("input", { text: "bypassed request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "bypassed request" });
+    await harness.emit("agent_settled");
+    expect(transport).not.toHaveBeenCalled();
+
+    await harness.command("auto on");
+    await harness.emit("input", { text: "automatically routed request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "automatically routed request" });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives a pending Route Override priority over Automatic Routing", async () => {
+    await writeConfig({ automaticRouting: true });
+    const transport = vi.fn(async () =>
+      createDecisionsResponse({ codeWork: 0.1, deepReasoning: 0.1, externalResearch: 0.9 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "override this request" });
+
+    expect(transport).not.toHaveBeenCalled();
+    expect(harness.currentModel && modelKey(harness.currentModel)).toBe("anthropic/coding/model");
   });
 
   it("does not emit invalid-configuration notifications in machine-readable modes", async () => {
