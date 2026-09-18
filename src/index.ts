@@ -337,15 +337,19 @@ async function restoreTrackedBaseline(
   } finally {
     if (state.baselineRestorationInFlight === run) state.baselineRestorationInFlight = undefined;
   }
+  let checkpointRecorded = true;
   try {
     appendCheckpoint(pi, run, restored ? "complete" : "restoration_failed");
   } catch {
+    checkpointRecorded = false;
     if (restored) {
       restored = false;
       notifyRoutingFailure(ctx, "Pi Jev Helm restored the Baseline but could not complete its checkpoint");
+    } else {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not record the checkpoint restoration failure");
     }
   }
-  if (restored || !retainFailedRestoration) {
+  if (restored || (!retainFailedRestoration && checkpointRecorded)) {
     if (state.pendingBaselineRestoration === run) state.pendingBaselineRestoration = undefined;
   } else {
     state.pendingBaselineRestoration = run;
@@ -431,6 +435,18 @@ async function finishRoutedRun(
   if (!run) return true;
 
   return restoreTrackedBaseline(pi, run, ctx, state, retainFailedRestoration);
+}
+
+async function prepareForNewWork(
+  pi: ExtensionAPI,
+  state: HelmState,
+  ctx: ExtensionContext,
+): Promise<boolean> {
+  if (!(await attemptCheckpointRecovery(pi, ctx, state))) return false;
+  if (state.pendingBaselineRestoration) {
+    return finishRoutedRun(pi, state, ctx, true);
+  }
+  return true;
 }
 
 async function beginRoutedRun(
@@ -796,13 +812,18 @@ export default function helmExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("input", (event) => {
-    if (event.streamingBehavior === undefined) state.pendingIdleUserMessage = event.text;
+  pi.on("input", async (event, ctx) => {
+    if (event.streamingBehavior !== undefined) return { action: "continue" };
+    if (!(await prepareForNewWork(pi, state, ctx))) {
+      notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline; the request was not started");
+      return { action: "handled" };
+    }
+    state.pendingIdleUserMessage = event.text;
+    return { action: "continue" };
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    if (!(await attemptCheckpointRecovery(pi, ctx, state))) return;
-    if (state.pendingBaselineRestoration && !(await finishRoutedRun(pi, state, ctx, true))) return;
+    if (!(await prepareForNewWork(pi, state, ctx))) return;
     if (state.routingAttemptedForCurrentRun) return;
 
     const currentUserMessage = state.pendingIdleUserMessage;

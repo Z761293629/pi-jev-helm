@@ -34,6 +34,7 @@ type FakeSessionEntry = {
 };
 type HarnessOptions = {
   appendEntryError?: boolean;
+  appendEntryErrors?: boolean[];
   appliedModels?: Record<string, FakeModel[]>;
   initialModel?: FakeModel;
   initialThinkingLevel?: string;
@@ -79,10 +80,12 @@ function createHarness(
   ];
   let thinkingLevel = options.initialThinkingLevel ?? "medium";
 
-  async function dispatch(name: string, event: unknown): Promise<void> {
+  async function dispatch(name: string, event: unknown): Promise<unknown> {
+    let result: unknown;
     for (const handler of events.get(name) ?? []) {
-      await handler(event as never, context);
+      result = await handler(event as never, context);
     }
+    return result;
   }
 
   const contextValue = {
@@ -164,7 +167,9 @@ function createHarness(
       commands.set(name, command);
     },
     appendEntry(customType: string, data?: unknown) {
-      if (options.appendEntryError) throw new Error("session storage unavailable");
+      if (options.appendEntryErrors?.shift() ?? options.appendEntryError) {
+        throw new Error("session storage unavailable");
+      }
       const previous = sessionEntries.at(-1);
       sessionEntries.push({
         type: "custom",
@@ -221,7 +226,7 @@ function createHarness(
       return thinkingLevel;
     },
     async emit(name: string, event: unknown = {}) {
-      await dispatch(name, event);
+      return dispatch(name, event);
     },
     async selectModel(model: FakeModel = explicitModel, level = "low") {
       await selectExplicitModel(model, level);
@@ -791,6 +796,39 @@ describe("Pi Jev Helm extension", () => {
     );
   });
 
+  it("handles idle input without starting work until checkpoint recovery succeeds", async () => {
+    const sessionEntries = await interruptCodingRouteTarget();
+    const restarted = createHarness("tui", {
+      sessionEntries,
+      initialModel: {
+        provider: completeRoutes.coding.provider,
+        id: completeRoutes.coding.model,
+      },
+      initialThinkingLevel: completeRoutes.coding.thinkingLevel,
+      modelResults: { "baseline-provider/baseline-model": [false, false, true] },
+    });
+    await restarted.emit("session_start", { reason: "startup" });
+
+    await expect(
+      restarted.emit("input", { text: "must wait", source: "interactive" }),
+    ).resolves.toEqual({ action: "handled" });
+    expect(restarted.currentModel).toMatchObject({
+      provider: completeRoutes.coding.provider,
+      id: completeRoutes.coding.model,
+    });
+
+    await expect(
+      restarted.emit("input", { text: "can proceed", source: "interactive" }),
+    ).resolves.toEqual({ action: "continue" });
+    expect(restarted.currentModel).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(sessionEntries.at(-1)?.data).toEqual(
+      expect.objectContaining({ status: "complete" }),
+    );
+  });
+
   it("records a failed recovery explicitly and retries it before new work", async () => {
     const sessionEntries = await interruptCodingRouteTarget();
 
@@ -827,25 +865,37 @@ describe("Pi Jev Helm extension", () => {
     );
   });
 
-  it("documents that forced termination cannot recover a checkpoint lost before durable persistence", async () => {
-    const sessionEntries = await interruptCodingRouteTarget();
+  it("keeps the pending checkpoint recoverable when recording restoration failure fails", async () => {
+    await writeConfig({ automaticRouting: false });
+    const sessionEntries: FakeSessionEntry[] = [];
+    const interrupted = createHarness("tui", {
+      sessionEntries,
+      appendEntryErrors: [false, true],
+      modelResults: { "baseline-provider/baseline-model": [false] },
+    });
+    await interrupted.emit("session_start", { reason: "startup" });
+    await interrupted.command("route coding");
+    await interrupted.emit("before_agent_start", { prompt: "interrupted work" });
 
-    sessionEntries.length = 0;
+    await interrupted.emit("session_shutdown", { reason: "quit" });
+
+    expect(interrupted.notices.at(-1)?.message).toContain(
+      "could not record the checkpoint restoration failure",
+    );
+    expect(sessionEntries.at(-1)?.data).toMatchObject({ status: "pending" });
+
     const restarted = createHarness("tui", {
       sessionEntries,
-      initialModel: {
-        provider: completeRoutes.coding.provider,
-        id: completeRoutes.coding.model,
-      },
+      initialModel: { provider: completeRoutes.coding.provider, id: completeRoutes.coding.model },
       initialThinkingLevel: completeRoutes.coding.thinkingLevel,
     });
     await restarted.emit("session_start", { reason: "startup" });
 
-    expect(restarted.modelChanges).toEqual([]);
     expect(restarted.currentModel).toMatchObject({
-      provider: completeRoutes.coding.provider,
-      id: completeRoutes.coding.model,
+      provider: "baseline-provider",
+      id: "baseline-model",
     });
+    expect(sessionEntries.at(-1)?.data).toMatchObject({ status: "complete" });
   });
 
   it("does not apply a Route Target when a recoverable checkpoint cannot be written", async () => {

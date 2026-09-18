@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +7,7 @@ import {
   type FauxProviderHandle,
 } from "@earendil-works/pi-ai/providers/faux";
 import {
+  AgentSessionRuntime,
   createAgentSession,
   DefaultResourceLoader,
   ModelRuntime,
@@ -49,6 +50,142 @@ afterEach(() => {
 });
 
 describe("Pi Jev Helm public API lifecycle", () => {
+  it("documents Pi's forced-termination durability boundary with a persisted session", async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-persistence-"));
+    const sessionManager = SessionManager.create(sessionDir, join(sessionDir, "sessions"));
+    sessionManager.appendMessage({
+      role: "user",
+      content: "interrupted request",
+      timestamp: Date.now(),
+    });
+    sessionManager.appendCustomEntry("pi-jev-helm-baseline-checkpoint", {
+      schemaVersion: 1,
+      checkpointId: "not-yet-durable",
+      status: "pending",
+      baseline: {
+        provider: "baseline-provider",
+        model: "baseline-model",
+        thinkingLevel: "medium",
+      },
+    });
+    const sessionFile = sessionManager.getSessionFile();
+    expect(sessionFile).toBeDefined();
+
+    await expect(access(sessionFile!)).rejects.toThrow();
+
+    sessionManager.appendMessage(fauxAssistantMessage("durability boundary crossed"));
+    await expect(access(sessionFile!)).resolves.toBeUndefined();
+    expect(await readFile(sessionFile!, "utf8")).toContain("not-yet-durable");
+  });
+
+  it("restores an active Routed Run through AgentSessionRuntime disposal", async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-runtime-dispose-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    await writeFile(
+      join(agentDir, "pi-jev-helm.json"),
+      JSON.stringify({ schemaVersion: 1, automaticRouting: true, routes: completeRoutes }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+
+    const baseline = createSingleModelFauxProvider("baseline-provider", "baseline-model");
+    const coding = createSingleModelFauxProvider(
+      completeRoutes.coding.provider,
+      completeRoutes.coding.model,
+    );
+    const classifierAuth = createSingleModelFauxProvider(
+      completeRoutes.fast.provider,
+      completeRoutes.fast.model,
+    );
+    const responseStarted = deferred<void>();
+    const releaseResponse = deferred<void>();
+    const delayedResponse = async () => {
+      responseStarted.resolve(undefined);
+      await releaseResponse.promise;
+      return fauxAssistantMessage("request completed");
+    };
+    baseline.setResponses([delayedResponse]);
+    coding.setResponses([delayedResponse]);
+
+    const modelRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    modelRuntime.registerNativeProvider(withApiKeyAuth(baseline));
+    modelRuntime.registerNativeProvider(withApiKeyAuth(coding));
+    modelRuntime.registerNativeProvider(withApiKeyAuth(classifierAuth));
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: false },
+      retry: { enabled: false },
+    });
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: agentDir,
+      agentDir,
+      settingsManager,
+      extensionFactories: [helmExtension],
+    });
+    await resourceLoader.reload();
+    const sessionManager = SessionManager.inMemory(agentDir);
+    const created = await createAgentSession({
+      cwd: agentDir,
+      agentDir,
+      model: baseline.getModel(),
+      thinkingLevel: "medium",
+      modelRuntime,
+      resourceLoader,
+      sessionManager,
+      settingsManager,
+      noTools: "all",
+    });
+    const runtime = new AgentSessionRuntime(
+      created.session,
+      {
+        cwd: agentDir,
+        agentDir,
+        modelRuntime,
+        settingsManager,
+        resourceLoader,
+        diagnostics: [],
+      },
+      async () => {
+        throw new Error("session replacement is not used by this test");
+      },
+    );
+    await runtime.session.bindExtensions({});
+
+    const prompt = runtime.session.prompt("change this code");
+    await responseStarted.promise;
+    expect(
+      sessionManager
+        .getBranch()
+        .filter(
+          (entry) =>
+            entry.type === "custom" && entry.customType === "pi-jev-helm-baseline-checkpoint",
+        )
+        .at(-1),
+    ).toMatchObject({ data: { status: "pending" } });
+
+    await runtime.dispose();
+    releaseResponse.resolve(undefined);
+    await prompt.catch(() => undefined);
+
+    expect(runtime.session.model).toMatchObject({
+      provider: "baseline-provider",
+      id: "baseline-model",
+    });
+    expect(runtime.session.thinkingLevel).toBe("medium");
+    expect(
+      sessionManager
+        .getBranch()
+        .filter(
+          (entry) =>
+            entry.type === "custom" && entry.customType === "pi-jev-helm-baseline-checkpoint",
+        )
+        .at(-1),
+    ).toMatchObject({ data: { status: "complete" } });
+  });
+
   it("restores an incomplete Baseline checkpoint through Pi session persistence", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-public-api-"));
     process.env.PI_CODING_AGENT_DIR = agentDir;
