@@ -9,12 +9,30 @@ import type {
 
 import {
   OpenRouterJevClassificationProvider,
+  CAPABILITY_SIGNAL_NAMES,
+  type CapabilitySignalName,
   type ClassificationProvider,
+  type TaskClassificationV1,
 } from "./classification-provider.js";
-import { loadHelmConfig, type ConfigLoadResult, type Route, ROUTES } from "./config.js";
-import { selectRoute } from "./routing-policy.js";
+import { loadHelmConfig, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
+import { selectRoute, type RoutingPolicyResult } from "./routing-policy.js";
+import {
+  formatRoutingExplanation,
+  formatSource,
+  recordRoutingExplanation,
+  ROUTING_EXPLANATION_SCHEMA_VERSION,
+  selectBranchRoutingExplanation,
+  type AttemptClassification,
+  type ExplainedConfidenceCheck,
+  type ExplainedFailOpen,
+  type ExplainedModelWithThinking,
+  type ExplainedSignal,
+  type ExplanationAttempt,
+  type FailOpenReason,
+  type RoutingAttemptExplanation,
+} from "./routing-explanation.js";
 
-const HELM_COMMANDS = ["auto", "route"] as const;
+const HELM_COMMANDS = ["auto", "route", "why"] as const;
 const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = 1;
 
@@ -53,11 +71,25 @@ const THINKING_LEVELS: readonly PiThinkingLevel[] = [
   "max",
 ];
 
-type RouteTargetAttempt = {
+type RouteTargetAttempt = ExplanationAttempt & {
   route: Route;
-  source: "Automatic Routing" | "Route Override";
   cancellationRevision: number;
 };
+
+type AttemptExplanationDetails =
+  | {
+      outcome: "routed";
+      route: Route;
+      target: ExplainedModelWithThinking;
+      restorationRequired: boolean;
+    }
+  | {
+      outcome: "fail-open";
+      route?: Route;
+      target?: ExplainedModelWithThinking;
+      failOpen: ExplainedFailOpen;
+      restorationRequired: boolean;
+    };
 
 type HelmModelSelectionOperation = {
   kind: "model";
@@ -181,6 +213,93 @@ function isModelInScope(ctx: ExtensionContext, model: PiModel): boolean {
     ctx.scopedModels.length === 0 ||
     ctx.scopedModels.some((scoped) => isExactModel(scoped.model, model.provider, model.id))
   );
+}
+
+function explainedSignals(classification: TaskClassificationV1): ExplainedSignal[] {
+  return CAPABILITY_SIGNAL_NAMES.map((name) => ({
+    name,
+    value: classification.signals[name].value,
+    confidence: classification.signals[name].confidence,
+  }));
+}
+
+function confidenceCheck(
+  threshold: number,
+  relevantSignals: readonly CapabilitySignalName[],
+  failedSignals: readonly CapabilitySignalName[],
+): ExplainedConfidenceCheck {
+  return { threshold, relevantSignals: [...relevantSignals], failedSignals: [...failedSignals] };
+}
+
+function trackedBaselineRef(run: TrackedBaseline): ExplainedModelWithThinking {
+  return {
+    provider: run.baselineModel.provider,
+    model: run.baselineModel.id,
+    thinkingLevel: run.baselineThinkingLevel,
+  };
+}
+
+function recordAttemptExplanation(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  attempt: ExplanationAttempt,
+  run: TrackedBaseline | undefined,
+  details: AttemptExplanationDetails,
+): void {
+  const baseline: ExplainedModelWithThinking | undefined = run
+    ? trackedBaselineRef(run)
+    : ctx.model
+      ? {
+          provider: ctx.model.provider,
+          model: ctx.model.id,
+          thinkingLevel: pi.getThinkingLevel(),
+        }
+      : undefined;
+  const shared: Pick<
+    RoutingAttemptExplanation,
+    | "schemaVersion"
+    | "kind"
+    | "runId"
+    | "source"
+    | "signals"
+    | "confidenceCheck"
+    | "policyBranch"
+    | "baseline"
+    | "appliedModel"
+    | "appliedThinkingLevel"
+    | "restorationRequired"
+  > = {
+    schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+    kind: "routing-attempt",
+    runId: attempt.runId,
+    source: attempt.source,
+    ...(attempt.classification?.signals.length
+      ? { signals: attempt.classification.signals }
+      : {}),
+    ...(attempt.classification?.confidenceCheck
+      ? { confidenceCheck: attempt.classification.confidenceCheck }
+      : {}),
+    ...(attempt.classification?.policyBranch
+      ? { policyBranch: attempt.classification.policyBranch }
+      : {}),
+    ...(baseline ? { baseline } : {}),
+    ...(ctx.model
+      ? { appliedModel: { provider: ctx.model.provider, model: ctx.model.id } }
+      : {}),
+    appliedThinkingLevel: pi.getThinkingLevel(),
+    restorationRequired: details.restorationRequired,
+  };
+  const entry: RoutingAttemptExplanation =
+    details.outcome === "routed"
+      ? { ...shared, outcome: "routed", route: details.route, target: details.target }
+      : {
+          ...shared,
+          outcome: "fail-open" as const,
+          ...(details.route ? { route: details.route } : {}),
+          ...(details.target ? { target: details.target } : {}),
+          failOpen: details.failOpen,
+        };
+  recordRoutingExplanation(pi, entry);
 }
 
 function notifyRoutingFailure(ctx: ExtensionContext, message: string): void {
@@ -322,12 +441,19 @@ async function restoreBaseline(
   }
 }
 
+type RestorationOptions = {
+  /** Keep the run pending for a later retry when restoration fails. */
+  retainFailedRestoration: boolean;
+  /** Record the run's restoration outcome as a Routing Explanation entry. */
+  recordRestorationEntry: boolean;
+};
+
 async function restoreTrackedBaseline(
   pi: ExtensionAPI,
   run: TrackedBaseline,
   ctx: ExtensionContext,
   state: HelmState,
-  retainFailedRestoration: boolean,
+  options: RestorationOptions,
 ): Promise<boolean> {
   state.pendingBaselineRestoration = run;
   state.baselineRestorationInFlight = run;
@@ -349,7 +475,16 @@ async function restoreTrackedBaseline(
       notifyRoutingFailure(ctx, "Pi Jev Helm could not record the checkpoint restoration failure");
     }
   }
-  if (restored || (!retainFailedRestoration && checkpointRecorded)) {
+  if (options.recordRestorationEntry) {
+    recordRoutingExplanation(pi, {
+      schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+      kind: "restoration",
+      runId: run.checkpointId,
+      outcome: restored ? "restored" : "failed",
+      ...(restored ? { baseline: trackedBaselineRef(run) } : {}),
+    });
+  }
+  if (restored || (!options.retainFailedRestoration && checkpointRecorded)) {
     if (state.pendingBaselineRestoration === run) state.pendingBaselineRestoration = undefined;
   } else {
     state.pendingBaselineRestoration = run;
@@ -393,7 +528,7 @@ async function recoverCheckpoint(
     checkpointId: checkpoint.checkpointId,
     helmSelectedModel: ctx.model ?? model,
   };
-  return restoreTrackedBaseline(pi, run, ctx, state, true);
+  return restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration: true, recordRestorationEntry: true });
 }
 
 async function attemptCheckpointRecovery(
@@ -415,12 +550,20 @@ async function attemptCheckpointRecovery(
 async function failAfterRouteTargetApplication(
   pi: ExtensionAPI,
   run: ActiveRoutedRun,
+  attempt: ExplanationAttempt,
   ctx: ExtensionContext,
   state: HelmState,
+  reason: FailOpenReason,
   message: string,
 ): Promise<void> {
   state.pendingRouteTargetApplication = undefined;
-  await restoreTrackedBaseline(pi, run, ctx, state, true);
+  const restored = await restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration: true, recordRestorationEntry: false });
+  recordAttemptExplanation(pi, ctx, attempt, run, {
+    outcome: "fail-open",
+    route: run.route,
+    failOpen: { reason, baselineRetained: restored },
+    restorationRequired: true,
+  });
   notifyRoutingFailure(ctx, message);
 }
 
@@ -434,7 +577,7 @@ async function finishRoutedRun(
   state.activeRoutedRun = undefined;
   if (!run) return true;
 
-  return restoreTrackedBaseline(pi, run, ctx, state, retainFailedRestoration);
+  return restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration, recordRestorationEntry: true });
 }
 
 async function prepareForNewWork(
@@ -449,6 +592,18 @@ async function prepareForNewWork(
   return true;
 }
 
+function findExactScopedModel(ctx: ExtensionContext, target: RouteTarget): PiModel | undefined {
+  try {
+    const model = ctx.modelRegistry.find(target.provider, target.model);
+    if (!model || !isExactModel(model, target.provider, target.model) || !isModelInScope(ctx, model)) {
+      return undefined;
+    }
+    return model;
+  } catch {
+    return undefined;
+  }
+}
+
 async function beginRoutedRun(
   pi: ExtensionAPI,
   attempt: RouteTargetAttempt,
@@ -456,10 +611,25 @@ async function beginRoutedRun(
   state: HelmState,
 ): Promise<void> {
   if (!state.configuration.ok) return;
-  const { route, source, cancellationRevision } = attempt;
-  if (state.routeTargetApplicationRevision !== cancellationRevision) return;
+  const { route, cancellationRevision, runId } = attempt;
+  const sourceLabel = formatSource(attempt.source);
+  if (state.routeTargetApplicationRevision !== cancellationRevision) {
+    recordAttemptExplanation(pi, ctx, attempt, undefined, {
+      outcome: "fail-open",
+      route,
+      failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: true },
+      restorationRequired: false,
+    });
+    return;
+  }
   if (!ctx.model) {
-    notifyRoutingFailure(ctx, `${source} ${route} could not capture the Baseline Model`);
+    recordAttemptExplanation(pi, ctx, attempt, undefined, {
+      outcome: "fail-open",
+      route,
+      failOpen: { reason: "baseline-unavailable", baselineRetained: false },
+      restorationRequired: false,
+    });
+    notifyRoutingFailure(ctx, `${sourceLabel} ${route} could not capture the Baseline Model`);
     return;
   }
 
@@ -467,45 +637,64 @@ async function beginRoutedRun(
     route,
     baselineModel: ctx.model,
     baselineThinkingLevel: pi.getThinkingLevel(),
-    checkpointId: randomUUID(),
+    checkpointId: runId,
     helmSelectedModel: ctx.model,
   };
   const target = state.configuration.config.routes[route];
-  let model: PiModel | undefined;
-  try {
-    model = ctx.modelRegistry.find(target.provider, target.model);
-  } catch {
-    notifyRoutingFailure(ctx, `${source} ${route} Route Target is unavailable`);
-    return;
-  }
-  if (!model || !isExactModel(model, target.provider, target.model) || !isModelInScope(ctx, model)) {
-    notifyRoutingFailure(ctx, `${source} ${route} Route Target is unavailable`);
+  const model = findExactScopedModel(ctx, target);
+  if (!model) {
+    recordAttemptExplanation(pi, ctx, attempt, run, {
+      outcome: "fail-open",
+      route,
+      failOpen: { reason: "target-unavailable", baselineRetained: true },
+      restorationRequired: false,
+    });
+    notifyRoutingFailure(ctx, `${sourceLabel} ${route} Route Target is unavailable`);
     return;
   }
 
   run.helmSelectedModel = model;
+  const targetExplanation: ExplainedModelWithThinking = {
+    provider: target.provider,
+    model: target.model,
+    thinkingLevel: target.thinkingLevel,
+  };
   state.pendingRouteTargetApplication = run;
   try {
     appendCheckpoint(pi, run, "pending");
   } catch {
     state.pendingRouteTargetApplication = undefined;
-    notifyRoutingFailure(ctx, `${source} ${route} could not store the Baseline checkpoint`);
+    recordAttemptExplanation(pi, ctx, attempt, run, {
+      outcome: "fail-open",
+      route,
+      failOpen: { reason: "checkpoint-unavailable", baselineRetained: true },
+      restorationRequired: false,
+    });
+    notifyRoutingFailure(ctx, `${sourceLabel} ${route} could not store the Baseline checkpoint`);
     return;
   }
   try {
     const modelSelected = await selectModelFromHelm(pi, state, model);
     if (state.routeTargetApplicationRevision !== cancellationRevision) {
       state.pendingRouteTargetApplication = undefined;
-      await restoreTrackedBaseline(pi, run, ctx, state, true);
+      const restored = await restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration: true, recordRestorationEntry: false });
+      recordAttemptExplanation(pi, ctx, attempt, run, {
+        outcome: "fail-open",
+        route,
+        failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: restored },
+        restorationRequired: true,
+      });
       return;
     }
     if (!modelSelected) {
       await failAfterRouteTargetApplication(
         pi,
         run,
+        attempt,
         ctx,
         state,
-        `${source} ${route} Route Target is unavailable`,
+        "target-unavailable",
+        `${sourceLabel} ${route} Route Target is unavailable`,
       );
       return;
     }
@@ -513,9 +702,11 @@ async function beginRoutedRun(
       await failAfterRouteTargetApplication(
         pi,
         run,
+        attempt,
         ctx,
         state,
-        `${source} ${route} Route Target could not be applied exactly`,
+        "target-apply-failed",
+        `${sourceLabel} ${route} Route Target could not be applied exactly`,
       );
       return;
     }
@@ -525,22 +716,32 @@ async function beginRoutedRun(
       await failAfterRouteTargetApplication(
         pi,
         run,
+        attempt,
         ctx,
         state,
-        `${source} ${route} Route Target thinking level could not be applied`,
+        "target-thinking-apply-failed",
+        `${sourceLabel} ${route} Route Target thinking level could not be applied`,
       );
       return;
     }
 
     state.pendingRouteTargetApplication = undefined;
     state.activeRoutedRun = run;
+    recordAttemptExplanation(pi, ctx, attempt, run, {
+      outcome: "routed",
+      route,
+      target: targetExplanation,
+      restorationRequired: true,
+    });
   } catch {
     await failAfterRouteTargetApplication(
       pi,
       run,
+      attempt,
       ctx,
       state,
-      `${source} ${route} Route Target could not be applied`,
+      "target-apply-failed",
+      `${sourceLabel} ${route} Route Target could not be applied`,
     );
   }
 }
@@ -560,11 +761,23 @@ async function beginAutomaticRouting(
 ): Promise<void> {
   if (!state.configuration.ok) return;
   const cancellationRevision = state.routeTargetApplicationRevision;
+  const runId = randomUUID();
+  const attempt: ExplanationAttempt = { runId, source: "automatic" };
+  let attemptRecorded = false;
+  const recordFailOpen = (failOpen: ExplainedFailOpen, classification?: AttemptClassification): void => {
+    attemptRecorded = true;
+    recordAttemptExplanation(pi, ctx, { ...attempt, ...(classification ? { classification } : {}) }, undefined, {
+      outcome: "fail-open",
+      failOpen,
+      restorationRequired: false,
+    });
+  };
 
   try {
     const classificationProvider = await createClassificationProvider(ctx);
     if (state.routeTargetApplicationRevision !== cancellationRevision) return;
     if (!classificationProvider) {
+      recordFailOpen({ reason: "provider-unavailable", baselineRetained: true });
       notifyRoutingFailure(ctx, "Automatic Routing could not authenticate the Classification Provider");
       return;
     }
@@ -573,39 +786,105 @@ async function beginAutomaticRouting(
       prompt,
       ctx.signal ? { signal: ctx.signal } : undefined,
     );
-    if (state.routeTargetApplicationRevision !== cancellationRevision) return;
     if (!result.ok) {
-      if (result.failure.kind !== "aborted") {
+      const aborted = result.failure.kind === "aborted";
+      recordFailOpen({
+        reason: aborted ? "classification-aborted" : "classification-failed",
+        baselineRetained: true,
+        ...(aborted
+          ? {}
+          : {
+              classification: {
+                kind: result.failure.kind,
+                ...(result.failure.status === undefined ? {} : { status: result.failure.status }),
+              },
+            }),
+      });
+      if (!aborted) {
         notifyRoutingFailure(ctx, "Automatic Routing classification failed");
       }
       return;
     }
-
     const decision = selectRoute(
       result.classification,
       state.configuration.config.confidenceThreshold,
     );
-    if (!decision.ok) return;
+    if (state.routeTargetApplicationRevision !== cancellationRevision) {
+      recordFailOpen(
+        { reason: "superseded-by-explicit-choice", baselineRetained: true },
+        automaticClassificationDetails(state, result.classification, decision),
+      );
+      return;
+    }
+    if (!decision.ok) {
+      recordFailOpen(
+        { reason: "low-confidence", baselineRetained: true },
+        automaticClassificationDetails(state, result.classification, decision),
+      );
+      return;
+    }
 
     await beginRoutedRun(
       pi,
       {
         route: decision.route,
-        source: "Automatic Routing",
+        source: "automatic",
         cancellationRevision,
+        runId,
+        classification: automaticClassificationDetails(state, result.classification, decision),
       },
       ctx,
       state,
     );
   } catch {
+    if (!attemptRecorded) {
+      recordFailOpen({ reason: "unexpected-error", baselineRetained: true });
+    }
     notifyRoutingFailure(ctx, "Automatic Routing classification failed");
   }
 }
 
+function automaticClassificationDetails(
+  state: HelmState,
+  classification: TaskClassificationV1,
+  decision: RoutingPolicyResult,
+): AttemptClassification {
+  if (!state.configuration.ok) {
+    return { signals: explainedSignals(classification) };
+  }
+  const threshold = state.configuration.config.confidenceThreshold;
+  if (decision.ok) {
+    return {
+      signals: explainedSignals(classification),
+      confidenceCheck: confidenceCheck(threshold, decision.relevantSignals, []),
+      policyBranch: { candidateRoute: decision.route },
+    };
+  }
+  return {
+    signals: explainedSignals(classification),
+    confidenceCheck: confidenceCheck(
+      threshold,
+      decision.relevantSignals,
+      decision.lowConfidenceSignals,
+    ),
+    policyBranch: { candidateRoute: decision.candidateRoute },
+  };
+}
+
 function notifyInvalidUsage(ctx: ExtensionCommandContext): void {
   ctx.ui.notify(
-    "Usage: /helm | /helm auto on|off | /helm route fast|coding|reasoning|research|clear",
+    "Usage: /helm | /helm auto on|off | /helm route fast|coding|reasoning|research|clear | /helm why",
     "warning",
+  );
+}
+
+async function handleWhyCommand(ctx: ExtensionCommandContext): Promise<void> {
+  const explanation = selectBranchRoutingExplanation(ctx.sessionManager.getBranch());
+  ctx.ui.notify(
+    explanation
+      ? formatRoutingExplanation(explanation)
+      : "Pi Jev Helm has no Routing Explanation recorded on the active branch.",
+    "info",
   );
 }
 
@@ -613,6 +892,11 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
   const tokens = args.trim().length === 0 ? [] : args.trim().split(/\s+/);
   if (tokens.length === 0) {
     ctx.ui.notify(formatStatus(state, ctx), "info");
+    return;
+  }
+
+  if (tokens[0] === "why" && tokens.length === 1) {
+    await handleWhyCommand(ctx);
     return;
   }
 
@@ -738,6 +1022,27 @@ export default function helmExtension(pi: ExtensionAPI): void {
           state.pendingBaselineRestoration = run;
         }
       }
+      if (completedByExplicitOverride) {
+        const baseline = trackedBaselineRef(run);
+        recordRoutingExplanation(pi, {
+          schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+          kind: "explicit-override",
+          runId: run.checkpointId,
+          override: {
+            kind: "model",
+            model: { provider: event.model.provider, model: event.model.id },
+            thinkingLevel: pi.getThinkingLevel(),
+          },
+          baseline,
+        });
+        recordRoutingExplanation(pi, {
+          schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+          kind: "restoration",
+          runId: run.checkpointId,
+          outcome: "superseded",
+          baseline,
+        });
+      }
     }
 
     state.activeRoutedRun = undefined;
@@ -782,6 +1087,15 @@ export default function helmExtension(pi: ExtensionAPI): void {
         appendCheckpoint(pi, run, "pending");
       } catch {
         notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
+      }
+      if (state.activeRoutedRun === run) {
+        recordRoutingExplanation(pi, {
+          schemaVersion: ROUTING_EXPLANATION_SCHEMA_VERSION,
+          kind: "explicit-override",
+          runId: run.checkpointId,
+          override: { kind: "thinking", thinkingLevel: event.level },
+          baseline: trackedBaselineRef(run),
+        });
       }
       return;
     }
@@ -836,8 +1150,9 @@ export default function helmExtension(pi: ExtensionAPI): void {
         pi,
         {
           route,
-          source: "Route Override",
+          source: "route-override",
           cancellationRevision: state.routeTargetApplicationRevision,
+          runId: randomUUID(),
         },
         ctx,
         state,
@@ -863,7 +1178,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     const pendingApplication = state.pendingRouteTargetApplication;
     state.pendingRouteTargetApplication = undefined;
     if (pendingApplication) {
-      await restoreTrackedBaseline(pi, pendingApplication, ctx, state, false);
+      await restoreTrackedBaseline(pi, pendingApplication, ctx, state, { retainFailedRestoration: false, recordRestorationEntry: false });
     }
     await attemptCheckpointRecovery(pi, ctx, state);
     await finishRoutedRun(pi, state, ctx, false);

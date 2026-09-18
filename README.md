@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, and recoverable Baseline checkpoints are implemented. Routing Explanations, live footer status, and the real Jev compatibility gate remain under development in later child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
+> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, recoverable Baseline checkpoints, and branch-aware Routing Explanations are implemented. Live footer status and the real Jev compatibility gate remain under development in later child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
 
 ## How V1 works
 
@@ -47,7 +47,9 @@ V1 command grammar:
 /helm why
 ```
 
-The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Classification uses one total 2500 ms attempt, validates the complete success contract, and maps cancellation, transport, HTTP, timeout, and protocol failures to safe typed outcomes before failing open. Routing Explanations and live footer diagnostics are added by subsequent V1 stages.
+The current implementation includes configuration health, instance-local Automatic Routing control, automatic classification through OpenRouter's fixed `typesafe/jev-1.13` model, deterministic confidence-gated Route selection, and one-shot Route Overrides. Automatic Routing and overrides resolve their configured Route Target exactly, apply it before the first Turn, keep it for the full Routed Run, and restore the Baseline Model after settlement. Overrides remain available while Automatic Routing is off and are consumed even when target resolution or application fails. Classification uses one total 2500 ms attempt, validates the complete success contract, and maps cancellation, transport, HTTP, timeout, and protocol failures to safe typed outcomes before failing open.
+
+Every real routing attempt writes a compact, branch-aware, non-context session entry: automatic success or fail-open, Route Override success or failure, and post-selection explicit overrides. Each entry records the applicable Capability Signals with their confidence, the decision-relevant confidence checks, the policy branch, the Route, the Route Target, the Baseline, the actually applied model, override events, the fail-open reason, and the restoration outcome. It never copies the user message, exposes chain of thought, invents a Jev rationale, or includes unsafe provider details. `/helm why` shows the current run's explanation when available, otherwise the most recent applicable explanation on the active conversation branch, as a read-only informational result without duplicating the session entry. Live footer diagnostics are added by a subsequent V1 stage.
 
 ## Lifecycle recovery
 

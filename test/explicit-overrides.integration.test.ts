@@ -264,6 +264,131 @@ describe("Pi Jev Helm public API lifecycle", () => {
     }
   });
 
+  it("keeps routing explanations branch-scoped through real tree navigation", async () => {
+    type ExplanationData = { kind?: string; runId?: string; source?: string; outcome?: string; route?: string };
+    const explanationData = (): ExplanationData[] =>
+      sessionManager
+        .getBranch()
+        .filter(
+          (entry) =>
+            entry.type === "custom" &&
+            entry.customType === "pi-jev-helm-routing-explanation",
+        )
+        .map((entry) => (entry as { data?: ExplanationData }).data ?? {});
+    const explanationEntryIds = (kind: string): string[] =>
+      sessionManager
+        .getBranch()
+        .filter(
+          (entry) =>
+            entry.type === "custom" &&
+            entry.customType === "pi-jev-helm-routing-explanation" &&
+            (entry as { data?: ExplanationData }).data?.kind === kind,
+        )
+        .map((entry) => entry.id);
+
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-explanations-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    await writeFile(
+      join(agentDir, "pi-jev-helm.json"),
+      JSON.stringify({ schemaVersion: 1, automaticRouting: true, routes: completeRoutes }),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+
+    const baseline = createSingleModelFauxProvider("baseline-provider", "baseline-model");
+    const coding = createSingleModelFauxProvider(
+      completeRoutes.coding.provider,
+      completeRoutes.coding.model,
+    );
+    const classifierAuth = createSingleModelFauxProvider(
+      completeRoutes.fast.provider,
+      completeRoutes.fast.model,
+    );
+    baseline.setResponses([fauxAssistantMessage("first run done"), fauxAssistantMessage("second run done")]);
+    coding.setResponses([fauxAssistantMessage("first run done"), fauxAssistantMessage("second run done")]);
+
+    const modelRuntime = await ModelRuntime.create({ modelsPath: null, refreshOnCreate: false });
+    modelRuntime.registerNativeProvider(withApiKeyAuth(baseline));
+    modelRuntime.registerNativeProvider(withApiKeyAuth(coding));
+    modelRuntime.registerNativeProvider(withApiKeyAuth(classifierAuth));
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: false },
+      retry: { enabled: false },
+    });
+    const resourceLoader = new DefaultResourceLoader({
+      cwd: agentDir,
+      agentDir,
+      settingsManager,
+      extensionFactories: [helmExtension],
+    });
+    await resourceLoader.reload();
+    const sessionManager = SessionManager.inMemory(agentDir);
+    const { session } = await createAgentSession({
+      cwd: agentDir,
+      agentDir,
+      model: baseline.getModel(),
+      thinkingLevel: "medium",
+      modelRuntime,
+      resourceLoader,
+      sessionManager,
+      settingsManager,
+      noTools: "all",
+    });
+
+    try {
+      await session.bindExtensions({});
+
+      await session.prompt("change this code");
+      expect(explanationData()[0]).toMatchObject({
+        schemaVersion: 1,
+        source: "automatic",
+        outcome: "routed",
+        route: "coding",
+      });
+      expect(explanationData().map((entry) => entry.kind)).toEqual([
+        "routing-attempt",
+        "restoration",
+      ]);
+      const firstRunId = explanationData()[0]?.runId;
+      expect(typeof firstRunId).toBe("string");
+
+      await session.prompt("change this code again");
+      expect(
+        explanationData().filter((entry) => entry.kind === "routing-attempt"),
+      ).toHaveLength(2);
+      const firstAttemptId = explanationEntryIds("routing-attempt")[0];
+      const secondAttemptId = explanationEntryIds("routing-attempt").at(-1);
+
+      // Navigate the tree to the first run's restoration entry: the second
+      // run's explanation entries sit after it and leave the branch.
+      const firstRestorationId = explanationEntryIds("restoration")[0];
+      expect(firstRestorationId).toBeDefined();
+      await session.navigateTree(firstRestorationId!);
+
+      expect(explanationData().map((entry) => entry.kind)).toEqual([
+        "routing-attempt",
+        "restoration",
+      ]);
+      expect(explanationData().every((entry) => entry.runId === firstRunId)).toBe(true);
+
+      // Navigating forward to the second run's attempt restores its explanation.
+      expect(secondAttemptId).toBeDefined();
+      expect(secondAttemptId).not.toBe(firstAttemptId);
+      await session.navigateTree(secondAttemptId!);
+      expect(explanationData().map((entry) => entry.kind)).toEqual([
+        "routing-attempt",
+        "restoration",
+        "routing-attempt",
+      ]);
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("keeps an Explicit Model Override selected during pending Route Target application", async () => {
     const agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-public-api-"));
     process.env.PI_CODING_AGENT_DIR = agentDir;
