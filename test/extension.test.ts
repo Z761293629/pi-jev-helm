@@ -27,6 +27,10 @@ type FakeModel = { provider: string; id: string };
 type HarnessOptions = {
   appliedModels?: Record<string, FakeModel[]>;
   beforeModelApplication?: Record<string, () => Promise<void>>;
+  beforeModelSelectDispatch?: (
+    model: FakeModel,
+    selectModel: (model?: FakeModel, level?: string) => Promise<void>,
+  ) => Promise<void>;
   unavailableModels?: string[];
   modelResults?: Record<string, boolean[]>;
   mutateModelBeforeFailure?: string[];
@@ -109,6 +113,7 @@ function createHarness(
 
   async function dispatchModelSelection(model: FakeModel, previousModel: FakeModel | undefined): Promise<void> {
     if (!previousModel || modelKey(previousModel) !== modelKey(model)) {
+      await options.beforeModelSelectDispatch?.(model, selectExplicitModel);
       await dispatch("model_select", {
         type: "model_select",
         model,
@@ -116,6 +121,16 @@ function createHarness(
         source: "set",
       });
     }
+  }
+
+  async function selectExplicitModel(
+    model: FakeModel = explicitModel,
+    level = "low",
+  ): Promise<void> {
+    const previousModel = contextValue.model;
+    contextValue.model = model;
+    await dispatchThinkingLevelSelection(level);
+    await dispatchModelSelection(model, previousModel);
   }
 
   const pi = {
@@ -143,7 +158,7 @@ function createHarness(
       if (selectedThinkingLevel !== undefined) {
         await dispatchThinkingLevelSelection(selectedThinkingLevel);
       }
-      await dispatchModelSelection(appliedModel, previousModel);
+      await dispatchModelSelection(model, previousModel);
       return true;
     },
     getThinkingLevel() {
@@ -175,10 +190,7 @@ function createHarness(
       await dispatch(name, event);
     },
     async selectModel(model: FakeModel = explicitModel, level = "low") {
-      const previousModel = contextValue.model;
-      contextValue.model = model;
-      await dispatchThinkingLevelSelection(level);
-      await dispatchModelSelection(model, previousModel);
+      await selectExplicitModel(model, level);
     },
     async selectThinkingLevel(level: string) {
       await dispatchThinkingLevelSelection(level);
@@ -794,6 +806,27 @@ describe("Pi Jev Helm extension", () => {
       "newer-provider/newer-model",
       "latest-provider/latest-model",
     ]);
+  });
+
+  it("recognizes a nested external selection from an earlier model_select handler", async () => {
+    await writeConfig({ automaticRouting: false });
+    let reacted = false;
+    const harness = createHarness("tui", {
+      beforeModelSelectDispatch: async (model, selectModel) => {
+        if (!reacted && modelKey(model) === "anthropic/coding/model") {
+          reacted = true;
+          await selectModel();
+        }
+      },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+
+    await harness.emit("before_agent_start", { prompt: "implement this" });
+    await harness.emit("agent_settled");
+
+    expect(harness.currentModel).toMatchObject({ provider: "user-provider", id: "user-model" });
+    expect(harness.thinkingLevel).toBe("low");
   });
 
   it("recognizes a nested external selection triggered by Helm's model_select event", async () => {

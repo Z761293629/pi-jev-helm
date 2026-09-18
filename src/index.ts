@@ -30,6 +30,7 @@ type RouteTargetAttempt = {
 };
 
 type HelmModelSelectionOperation = {
+  target: PiModel;
   thinkingClampPending: boolean;
 };
 
@@ -154,7 +155,10 @@ async function selectModelFromHelm(
   state: HelmState,
   model: PiModel,
 ): Promise<boolean> {
-  const operation: HelmModelSelectionOperation = { thinkingClampPending: true };
+  const operation: HelmModelSelectionOperation = {
+    target: model,
+    thinkingClampPending: true,
+  };
   state.helmModelSelection = operation;
   try {
     return await helmSelectionOperation.run(operation, () => pi.setModel(model));
@@ -480,7 +484,11 @@ export default function helmExtension(pi: ExtensionAPI): void {
 
   pi.on("model_select", (event) => {
     const helmSelection = state.helmModelSelection;
-    if (helmSelection && helmSelectionOperation.getStore() === helmSelection) {
+    if (
+      helmSelection &&
+      helmSelectionOperation.getStore() === helmSelection &&
+      isExactModel(event.model, helmSelection.target.provider, helmSelection.target.id)
+    ) {
       state.helmModelSelection = undefined;
       return;
     }
