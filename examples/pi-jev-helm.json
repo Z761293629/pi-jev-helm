@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "automaticRouting": true,
+  "confidenceThreshold": 0.75,
+  "routes": {
+    "fast": {
+      "provider": "your-fast-provider",
+      "model": "your-fast-model",
+      "thinkingLevel": "off"
+    },
+    "coding": {
+      "provider": "your-coding-provider",
+      "model": "your-coding-model",
+      "thinkingLevel": "high"
+    },
+    "reasoning": {
+      "provider": "your-reasoning-provider",
+      "model": "your-reasoning-model",
+      "thinkingLevel": "high"
+    },
+    "research": {
+      "provider": "your-research-provider",
+      "model": "your-research-model",
+      "thinkingLevel": "medium"
+    }
+  }
+}

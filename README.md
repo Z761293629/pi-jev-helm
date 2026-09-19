@@ -61,7 +61,9 @@ Recovery is limited by Pi's public extension lifecycle and session persistence A
 
 ## Configuration
 
-Pi Jev Helm reads `pi-jev-helm.json` from the user directory returned by Pi's public `getAgentDir()` API. It reads the file at session startup and `/reload`; it does not watch the file or assume a home-directory path.
+Pi Jev Helm reads `pi-jev-helm.json` from the user directory returned by Pi's public `getAgentDir()` API; `/helm` reports this path as its `Configuration file` line. It reads the file at session startup and `/reload`; it does not watch the file or assume a home-directory path.
+
+A credential-free starter template is checked in at [`examples/pi-jev-helm.json`](examples/pi-jev-helm.json). Copy it to the configuration path, then replace every `your-` provider and model placeholder with an identity you can access; every standard thinking level (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) is valid. The template is validated by the production configuration loader in CI, so a schema drift fails the build instead of first-time setup.
 
 ```json
 {
@@ -70,23 +72,23 @@ Pi Jev Helm reads `pi-jev-helm.json` from the user directory returned by Pi's pu
   "confidenceThreshold": 0.75,
   "routes": {
     "fast": {
-      "provider": "openrouter",
-      "model": "fast-model-id",
+      "provider": "your-fast-provider",
+      "model": "your-fast-model",
       "thinkingLevel": "off"
     },
     "coding": {
-      "provider": "anthropic",
-      "model": "coding-model-id",
+      "provider": "your-coding-provider",
+      "model": "your-coding-model",
       "thinkingLevel": "high"
     },
     "reasoning": {
-      "provider": "openai",
-      "model": "reasoning-model-id",
+      "provider": "your-reasoning-provider",
+      "model": "your-reasoning-model",
       "thinkingLevel": "high"
     },
     "research": {
-      "provider": "google",
-      "model": "research-model-id",
+      "provider": "your-research-provider",
+      "model": "your-research-model",
       "thinkingLevel": "medium"
     }
   }
