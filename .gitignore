@@ -26,3 +26,6 @@ pnpm-debug.log*
 tmp/
 *.swp
 *~
+
+# Pi compatibility matrix installs
+.pi-matrix/

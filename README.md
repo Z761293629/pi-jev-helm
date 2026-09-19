@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, recoverable Baseline checkpoints, branch-aware Routing Explanations, live footer status, and the real Jev compatibility gate are implemented. Cross-version Pi public API lifecycle certification remains under development in [the final child issue](https://github.com/Z761293629/pi-jev-helm/issues/23) of the V1 specification.
+> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, recoverable Baseline checkpoints, branch-aware Routing Explanations, live footer status, the real Jev compatibility gate, and the cross-version Pi public-API lifecycle certification are implemented. The black-box lifecycle suite passes on Pi 0.85.1 and the newest stable Pi version; see [Pi compatibility](#pi-compatibility).
 
 ## How V1 works
 
@@ -105,6 +105,23 @@ npm run typecheck
 npm run build
 npm test
 ```
+
+### Verification tiers
+
+The repository separates three verification tiers; only the first runs by default.
+
+1. **Deterministic default CI** — `npm test`. Schema, configuration, Classification Provider contract, Routing Policy, command/state, privacy, and Routed Run lifecycle tests, including the Pi public-API black-box suite with in-process fake models. No external credentials, no network, no paid calls.
+2. **Pi compatibility matrix** — `npm run test:pi-matrix`. Discovers the newest stable Pi version from npm at run time, installs it plus the pinned minimum into isolated directories, swaps them in one at a time, and re-runs the black-box lifecycle suite against each. See [Pi compatibility](#pi-compatibility).
+3. **Real Jev compatibility gate** — `OPENROUTER_API_KEY=... npm run test:real-jev-gate`. Credentialed, paid, probabilistic; excluded from default CI by construction and run explicitly.
+
+### Pi compatibility
+
+V1 uses only Pi's public extension APIs and is certified against an executable matrix:
+
+- **Minimum supported Pi version:** `0.85.1`.
+- **Newest version intentionally supported:** the newest stable Pi version at certification time, discovered by the matrix script itself (`npm view @earendil-works/pi-coding-agent dist-tags.latest`). At certification this is `0.85.1`, so the certified range is `>=0.85.1 <0.86.0` (the `^0.85.1` peer dependency).
+- The matrix lives in `scripts/test-pi-matrix.mjs` and runs the same public-API black-box suite (`test/pi-black-box.test.ts`) against every distinct version in `{minimum, newest stable}`, driving the real in-process Pi SDK: extension loading, session lifecycle, model registry, session tree, and footer UI seams, with scripted in-process fake providers. Rerun it when a new Pi version is released; a failure means public lifecycle semantics diverged and the declared support range must be narrowed (or the extension adapted) rather than reaching for Pi internals.
+- Matrix installs are cached under `.pi-matrix/` (git-ignored); `PI_MATRIX_SKIP_INSTALL=1` reuses them.
 
 ### Real Jev compatibility gate
 
@@ -212,10 +229,10 @@ A later, separately specified capability may evaluate completion evidence, test 
 V1 uses three evidence layers:
 
 1. Deterministic schema, policy, configuration, command, privacy, and Provider contract tests, including the versioned `classification-v1` corpus (24 messages: every Boolean Capability Signal combination twice plus the semantic boundaries — verbosity is not Deep Reasoning, software discussion is not Code Work, local repository exploration is not External Research, ambiguous prompts fail open on low confidence).
-2. Black-box Pi public-extension-API tests with in-process fake models.
+2. Black-box Pi public-extension-API tests with in-process fake models (`test/pi-black-box.test.ts`, driven by `test/pi-harness.ts` through the real in-process Pi SDK). The suite covers all four Routes, Automatic Routing bypass, one-shot Route Override set/replace/clear/consumption (including while Automatic Routing is off), every fail-open path (Provider unavailable, classification failure, low confidence, unavailable or unappliable Route Target), Explicit Model and Thinking Overrides, the pre-application race, queued `steer` and `followUp` continuations, restoration, next-run isolation, branch-aware entries with `/helm why`, lifecycle recovery from an incomplete checkpoint, session replacement through Pi's `AgentSessionRuntime`, footer smoke states, and silence in print, JSON, and RPC modes — asserted through behavior and state tokens, never full-text snapshots.
 3. An explicitly invoked, credentialed real OpenRouter/Jev compatibility gate (`npm run test:real-jev-gate`), evaluated per message with a two-of-three rule so no aggregate pass rate can hide a consistently failing example.
 
-External probabilistic calls are excluded from default CI. The Pi lifecycle suite must cover version 0.85.1 and the newest intended compatible version.
+External probabilistic calls are excluded from default CI. The black-box lifecycle suite is certified against the minimum and newest supported Pi versions by the executable matrix (`npm run test:pi-matrix`, see [Pi compatibility](#pi-compatibility)).
 
 ## Project documentation
 
