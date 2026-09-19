@@ -678,7 +678,6 @@ describe("Pi public-API compatibility (black-box, in-process fake models)", () =
  * Resolve once the agent starts streaming assistant text. Uses only public
  * session events, so tests can queue continuations mid-run deterministically.
  */
-/** Resolve once the agent starts streaming assistant text (public session events). */
 async function waitForStreamingText(harness: HelmHarness): Promise<void> {
   const startLength = harness.events.length;
   await pollUntil(

@@ -110,8 +110,8 @@ npm test
 
 The repository separates three verification tiers; only the first runs by default.
 
-1. **Deterministic default CI** — `npm test`. Schema, configuration, Classification Provider contract, Routing Policy, command/state, privacy, and Routed Run lifecycle tests, including the Pi public-API black-box suite with in-process fake models. No external credentials, no network, no paid calls.
-2. **Pi compatibility matrix** — `npm run test:pi-matrix`. Discovers the newest stable Pi version from npm at run time, installs it plus the pinned minimum into isolated directories, swaps them in one at a time, and re-runs the black-box lifecycle suite against each. See [Pi compatibility](#pi-compatibility).
+1. **Deterministic default CI** — `npm test`, run with typecheck and build by [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Schema, configuration, Classification Provider contract, Routing Policy, command/state, privacy, and Routed Run lifecycle tests include the Pi public-API black-box suite with in-process fake models. No external credentials, network, or paid calls are required.
+2. **Pi compatibility matrix** — `npm run test:pi-matrix`, also run as a dedicated default-CI job. It discovers the newest stable Pi version from npm at run time, installs it plus the pinned minimum into isolated directories, swaps them in one at a time, and re-runs the black-box lifecycle suite against each. See [Pi compatibility](#pi-compatibility).
 3. **Real Jev compatibility gate** — `OPENROUTER_API_KEY=... npm run test:real-jev-gate`. Credentialed, paid, probabilistic; excluded from default CI by construction and run explicitly.
 
 ### Pi compatibility

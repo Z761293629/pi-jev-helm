@@ -18,11 +18,17 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const MINIMUM_PI_VERSION = "0.85.1";
-const REPO_ROOT = resolve(new URL("..", import.meta.url).pathname);
+const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MATRIX_DIR = join(REPO_ROOT, ".pi-matrix");
 const MAIN_PACKAGE = "@earendil-works/pi-coding-agent";
+const PEER_RANGE = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"))
+  .peerDependencies?.[MAIN_PACKAGE];
+const MINIMUM_PI_VERSION = /^\^(\d+\.\d+\.\d+)$/.exec(PEER_RANGE)?.[1];
+if (!MINIMUM_PI_VERSION) {
+  throw new Error(`expected ${MAIN_PACKAGE} peer dependency to be a caret range, received: ${PEER_RANGE}`);
+}
 const SWAPPED_PACKAGES = ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"];
 const BACKUP_SUFFIX = ".pi-matrix-backup";
 
@@ -82,37 +88,58 @@ function ensureInstall(matrixDir, version) {
 }
 
 /**
- * Point node_modules/<package> at the matrix installation. Returns a restore
- * function that unconditionally puts the original state back. It is also
- * registered globally so the end-of-run cleanup reuses the same logic.
+ * Recover a package left half-swapped by a forcibly interrupted matrix run.
+ * The backup suffix belongs exclusively to this script, so a backup plus a
+ * symlink (or missing target) is safe to restore. Any other collision stops
+ * rather than risking deletion of an unrelated installation.
+ */
+function recoverInterruptedSwap(target, backup) {
+  if (!existsSync(backup)) return;
+  const current = lstatSafe(target);
+  if (current?.isSymbolicLink()) {
+    rmSync(target);
+  } else if (current) {
+    throw new Error(`cannot recover matrix backup while target also exists: ${target}`);
+  }
+  renameSync(backup, target);
+}
+
+/**
+ * Point node_modules/<package> at the matrix installation. The restore
+ * function is armed before the first mutation and grows with each swap, so a
+ * throw at any point can restore every package already touched.
  */
 let armedRestore;
 function swapIn(matrixDir) {
   const swaps = [];
-  for (const packageName of SWAPPED_PACKAGES) {
-    const target = join(REPO_ROOT, "node_modules", packageName);
-    const backup = target + BACKUP_SUFFIX;
-    const prior = lstatSafe(target);
-    if (prior?.isSymbolicLink()) {
-      // Stale symlink from an interrupted run: just replace it.
-      rmSync(target);
-    } else if (prior) {
-      renameSync(target, backup);
-    }
-    mkdirSync(join(target, ".."), { recursive: true });
-    symlinkSync(relative(join(target, ".."), join(matrixDir, "node_modules", packageName)), target, "dir");
-    swaps.push({ target, backup, hadPrior: prior !== undefined && !prior.isSymbolicLink() });
-  }
   const restore = function restore() {
-    for (const { target, backup, hadPrior } of swaps.reverse()) {
+    for (const swap of [...swaps].reverse()) {
+      if (swap.restored) continue;
+      const { target, backup, hadPrior } = swap;
+      if (hadPrior && !existsSync(backup)) {
+        throw new Error(`cannot restore matrix package because its backup is missing: ${backup}`);
+      }
       // recursive rmSync handles both real directories and symlinks (Node
       // removes the link itself, never following it); a plain unlink of a
       // dir-symlink throws ERR_FS_EISDIR on current Node.
       rmSync(target, { force: true, recursive: true });
       if (hadPrior) renameSync(backup, target);
+      swap.restored = true;
     }
   };
   armedRestore = restore;
+
+  for (const packageName of SWAPPED_PACKAGES) {
+    const target = join(REPO_ROOT, "node_modules", packageName);
+    const backup = target + BACKUP_SUFFIX;
+    recoverInterruptedSwap(target, backup);
+    const prior = lstatSafe(target);
+    const swap = { target, backup, hadPrior: prior !== undefined, restored: false };
+    if (prior) renameSync(target, backup);
+    swaps.push(swap);
+    mkdirSync(join(target, ".."), { recursive: true });
+    symlinkSync(relative(join(target, ".."), join(matrixDir, "node_modules", packageName)), target, "dir");
+  }
   return restore;
 }
 
