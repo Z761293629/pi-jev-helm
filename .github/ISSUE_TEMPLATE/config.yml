@@ -1,0 +1,13 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Z761293629/pi-jev-helm/security/advisories/new
+    about: >-
+      Report a security vulnerability privately through GitHub Private
+      Vulnerability Reporting. Please do not open a public issue.
+  - name: Security policy
+    url: https://github.com/Z761293629/pi-jev-helm/blob/main/SECURITY.md
+    about: >-
+      Supported preview versions, the private reporting path, and the
+      sensitive-content rules that apply to every report.

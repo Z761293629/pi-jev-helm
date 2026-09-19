@@ -1,0 +1,104 @@
+name: Bug Report
+description: Report a defect in Pi Jev Helm. Security vulnerabilities must not be reported here.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a defect in Pi Jev Helm.
+
+        **Before you continue**
+
+        - This form is for **defects only** — something that is broken or behaves
+          contrary to its documented behavior. Capability proposals and
+          improvements belong in the
+          [Feature Request](https://github.com/Z761293629/pi-jev-helm/issues/new?template=feature_request.yml)
+          form.
+        - **Security vulnerabilities must not be reported here, even redacted.**
+          Use [GitHub Private Vulnerability Reporting](https://github.com/Z761293629/pi-jev-helm/security/advisories/new)
+          instead; see the
+          [security policy](https://github.com/Z761293629/pi-jev-helm/blob/main/SECURITY.md).
+        - Pi Jev Helm is a **Public Preview**: support is best-effort and there
+          is no response-time commitment.
+
+        **Sanitize everything you paste.** A report must not contain API keys,
+        raw sensitive prompts, or unsanitized upstream payloads. Replace each
+        redacted item with an obvious placeholder such as `<redacted>` while
+        keeping enough structure for the report to stay reproducible.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: |
+        The observed behavior, including any error notification, footer status,
+        or fail-open outcome. What did you see that should not have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead, according to the documented behavior?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction steps
+      description: |
+        Numbered steps starting from a fresh state, using a **synthetic,
+        non-sensitive prompt** (for example, `Classify this test message about
+        sorting algorithms`). If the defect only appears with your real
+        workload, reconstruct it with placeholder text that preserves the
+        structure of the request, not its content.
+      placeholder: |
+        1. Configure …
+        2. Start Pi and run …
+        3. Observe …
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - OS and version:
+        - Pi version (`pi --version`):
+        - Pi Jev Helm version or installed ref (tag or commit):
+        - Install method:
+        - Automatic Routing state (`/helm`): on / off
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized-evidence
+    attributes:
+      label: Sanitized evidence
+      description: |
+        Anything that makes the report reproducible: the `/helm why` Routing
+        Explanation, footer status text, relevant session routing entries, or
+        console output. Sanitize per the rules at the top of this form —
+        remove credentials, real prompt content, and upstream request or
+        response payloads before pasting.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: sensitive-content
+    attributes:
+      label: Sensitive-content checklist
+      description: Reports containing prohibited content may be edited or removed by maintainers.
+      options:
+        - label: My report contains no API keys, tokens, or other credentials.
+          required: true
+        - label: My report contains no raw sensitive prompts; any quoted message content is synthetic or reduced to structure with placeholders.
+          required: true
+        - label: My report contains no unsanitized upstream payloads (OpenRouter request or response bodies, provider error text, headers, or captured traffic).
+          required: true
+        - label: I understand Pi Jev Helm is a Public Preview and support is best-effort, with no response-time commitment.
+          required: true
