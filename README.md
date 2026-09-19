@@ -4,7 +4,7 @@ Pi Jev Helm is a planned [Pi](https://github.com/badlogic/pi-mono) extension tha
 
 It is designed to reduce manual model switching without taking control away from the user. Routing is explicit, configurable, inspectable, and fail-open: if classification or model switching fails, Pi continues with the user's existing **Baseline Model**.
 
-> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, recoverable Baseline checkpoints, branch-aware Routing Explanations, and live footer status are implemented. The real Jev compatibility gate remains under development in later child issues of [the V1 specification](https://github.com/Z761293629/pi-jev-helm/issues/12).
+> **Status:** The loadable extension, strict V1 configuration, automatic Jev Task Classification, deterministic Routing Policy, one-shot Route Override lifecycle, explicit user override precedence, recoverable Baseline checkpoints, branch-aware Routing Explanations, live footer status, and the real Jev compatibility gate are implemented. Cross-version Pi public API lifecycle certification remains under development in [the final child issue](https://github.com/Z761293629/pi-jev-helm/issues/23) of the V1 specification.
 
 ## How V1 works
 
