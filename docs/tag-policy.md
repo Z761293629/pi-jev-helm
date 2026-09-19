@@ -8,6 +8,10 @@ Pi Jev Helm distributes its Public Preview exclusively through immutable Git ver
 - If a published tag is defective, it is retained and superseded by a new patch tag (for example, `v0.1.0` is followed by `v0.1.1`); the original tag is never moved to different source.
 - Patch releases within one minor line preserve the user-facing configuration schema and `/helm` command grammar, so superseding a failed tag never silently changes user-visible behavior.
 
+## Release Gate
+
+Every `v*` tag push also triggers the automated Release Gate (`.github/workflows/release.yml`), which is the automation counterpart of this policy. Before any release work starts it verifies that the pushed tag equals `v<package-version>`; it then reruns the deterministic suites, the Pi compatibility matrix, the credentialed real Jev gate, and a user-level install smoke test of the pushed tag in a temporary HOME. Only if every gate succeeds does the workflow create the GitHub Pre-release for the existing tag; a failed gate never produces a Release, and the tag is never moved or deleted (see above).
+
 ## GitHub ruleset
 
 The policy is enforced by a repository ruleset configured through the GitHub REST API. It is recorded here because repository settings leave no trace inside the repository. Current configuration (`GET /repos/Z761293629/pi-jev-helm/rulesets`):
