@@ -16,7 +16,7 @@
 //   npm run test:pi-matrix
 //   PI_MATRIX_SKIP_INSTALL=1 npm run test:pi-matrix   # reuse cached installs
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +47,15 @@ function lstatSafe(path) {
     return lstatSync(path);
   } catch {
     return undefined;
+  }
+}
+
+function removePath(path) {
+  const current = lstatSafe(path);
+  if (current?.isSymbolicLink()) {
+    unlinkSync(path);
+  } else {
+    rmSync(path, { force: true, recursive: true });
   }
 }
 
@@ -97,7 +106,7 @@ function recoverInterruptedSwap(target, backup) {
   if (!existsSync(backup)) return;
   const current = lstatSafe(target);
   if (current?.isSymbolicLink()) {
-    rmSync(target);
+    removePath(target);
   } else if (current) {
     throw new Error(`cannot recover matrix backup while target also exists: ${target}`);
   }
@@ -119,10 +128,9 @@ function swapIn(matrixDir) {
       if (hadPrior && !existsSync(backup)) {
         throw new Error(`cannot restore matrix package because its backup is missing: ${backup}`);
       }
-      // recursive rmSync handles both real directories and symlinks (Node
-      // removes the link itself, never following it); a plain unlink of a
-      // dir-symlink throws ERR_FS_EISDIR on current Node.
-      rmSync(target, { force: true, recursive: true });
+      // Remove symlinks with unlink and real directories recursively; this
+      // works even when an interrupted run left a dangling directory symlink.
+      removePath(target);
       if (hadPrior) renameSync(backup, target);
       swap.restored = true;
     }
