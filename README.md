@@ -118,8 +118,9 @@ The repository separates three verification tiers; only the first runs by defaul
 
 V1 uses only Pi's public extension APIs and is certified against an executable matrix:
 
-- **Minimum supported Pi version:** `0.85.1`.
-- **Newest version intentionally supported:** the newest stable Pi version at certification time, discovered by the matrix script itself (`npm view @earendil-works/pi-coding-agent dist-tags.latest`). At certification this is `0.85.1`, so the certified range is `>=0.85.1 <0.86.0` (the `^0.85.1` peer dependency).
+- **Minimum supported Pi version:** `0.85.1`, pinned as the exact dev dependency `@earendil-works/pi-coding-agent@0.85.1`; this pin is the single minimum-version source for the matrix.
+- **Newest version intentionally supported:** the newest stable Pi version at certification time, discovered by the matrix script itself (`npm view @earendil-works/pi-coding-agent dist-tags.latest`). At certification this is also `0.85.1`, so certification evidence currently covers Pi `0.85.1`.
+- **Package contract:** per Pi package guidance, `@earendil-works/pi-coding-agent` is declared as a wildcard (`"*"`) peer dependency, so an installed Git package always uses the Pi installation supplied by its host. The peer range encodes no compatibility policy; the certification evidence above is the support statement.
 - The matrix lives in `scripts/test-pi-matrix.mjs` and runs the same public-API black-box suite (`test/pi-black-box.test.ts`) against every distinct version in `{minimum, newest stable}`, driving the real in-process Pi SDK: extension loading, session lifecycle, model registry, session tree, and footer UI seams, with scripted in-process fake providers. Rerun it when a new Pi version is released; a failure means public lifecycle semantics diverged and the declared support range must be narrowed (or the extension adapted) rather than reaching for Pi internals.
 - Matrix installs are cached under `.pi-matrix/` (git-ignored); `PI_MATRIX_SKIP_INSTALL=1` reuses them.
 
