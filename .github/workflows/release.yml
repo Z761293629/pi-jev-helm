@@ -1,0 +1,156 @@
+name: Release Gate
+
+# Tag-driven, unbypassable release gate for Pi Jev Helm.
+#
+# This workflow runs ONLY for `v*` tag pushes. It re-verifies everything the
+# release claims (deterministic suites, Pi compatibility, the credentialed
+# real Jev gate, and a real user-level install of the pushed tag) and creates
+# the GitHub Pre-release only after every gate has passed. A failed gate
+# produces no Release; the immutable tag stays and the fix ships as a new
+# patch tag (docs/tag-policy.md).
+#
+# Every job is read-only (`contents: read`). Only the final `release` job,
+# which depends on all gates, receives `contents: write` — the minimum needed
+# to create the Release. There is no signing, provenance, compiled bundle,
+# checksum, or npm tarball: the immutable tag is the distribution (ADR 0001).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    name: Tag equals v<package-version>
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # Fails the whole workflow before any release work starts unless the
+      # pushed tag is exactly "v" + package.json's version at the tag.
+      - name: Validate tag against package version
+        run: node scripts/validate-release-tag.mjs
+
+  deterministic:
+    name: Deterministic default suite (Node ${{ matrix.node-version }})
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      # Every declared Node.js runtime must produce its own evidence: one
+      # failing leg must not cancel the other before it finishes.
+      fail-fast: false
+      matrix:
+        # Keep in sync with .github/workflows/ci.yml and test/ci-contract.
+        node-version: [22.19.0, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  pi-compatibility:
+    name: Pi public-API compatibility matrix
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:pi-matrix
+
+  real-jev-gate:
+    name: Real Jev Gate (credentialed)
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # The credential exists only in this job's environment. It is never
+    # echoed, never written to a file, and this job uses no npm cache and no
+    # artifact steps, so nothing it produces can outlive the run. GitHub
+    # additionally masks the secret value in any log output.
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The gate must run, not skip: a missing credential fails the release
+      # explicitly before any other step. The message never contains the
+      # key itself.
+      - name: Require the OpenRouter credential
+        run: |
+          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+            echo "::error::OPENROUTER_API_KEY is not configured. The real Jev Gate is a mandatory, unskippable Release Gate: configure the repository Actions Secret named OPENROUTER_API_KEY, then re-run this workflow. No Release was created."
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run test:real-jev-gate
+
+  install-smoke-test:
+    name: Tag install smoke test (temporary HOME)
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      # The documented public install path (docs: quickstart), resolved to the
+      # newest stable Pi at run time — what a real user would install with.
+      - name: Install Pi globally
+        run: npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+      # Installs the pushed tag through Pi's own Git package installer inside
+      # a temporary HOME, then verifies settings registration, package
+      # listing, and extension resource discovery (see scripts/verify-tag-install.mjs).
+      - name: Install the released tag through Pi and verify it
+        run: node scripts/verify-tag-install.mjs --repo "${{ github.repository }}" --tag "${{ github.ref_name }}"
+
+  release:
+    name: Create GitHub Pre-release
+    needs: [validate-tag, deterministic, pi-compatibility, real-jev-gate, install-smoke-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # Runs only after every gate above succeeded; any failure skips this
+      # job, so a failing gate never produces a Release. The tag already
+      # exists (this workflow was triggered by its push); --verify-tag keeps
+      # the Release anchored to it.
+      - name: Create the Pre-release with automatic release notes
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --prerelease \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"
