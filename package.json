@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Fail-open Jev task routing for Pi",
+  "license": "MIT",
   "type": "module",
   "keywords": [
     "pi-package"
