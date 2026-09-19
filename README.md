@@ -99,7 +99,7 @@ A credential-free starter template is checked in at [`examples/pi-jev-helm.json`
 
 ## Development
 
-Pi 0.85.1 and Node.js 22.19 or newer are required.
+Pi 0.85.1 and Node.js 22.19.0 or newer are required; default CI certifies the exact minimum Node.js `22.19.0` and current Node.js `24`.
 
 ```bash
 npm ci
@@ -112,8 +112,8 @@ npm test
 
 The repository separates three verification tiers; only the first runs by default.
 
-1. **Deterministic default CI** — `npm test`, run with typecheck and build by [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Schema, configuration, Classification Provider contract, Routing Policy, command/state, privacy, and Routed Run lifecycle tests include the Pi public-API black-box suite with in-process fake models. No external credentials, network, or paid calls are required.
-2. **Pi compatibility matrix** — `npm run test:pi-matrix`, also run as a dedicated default-CI job. It discovers the newest stable Pi version from npm at run time, installs it plus the pinned minimum into isolated directories, swaps them in one at a time, and re-runs the black-box lifecycle suite against each. See [Pi compatibility](#pi-compatibility).
+1. **Deterministic default CI** — `npm test`, run with typecheck and build by [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on both declared Node.js runtimes: the exact minimum `22.19.0` and current Node.js `24`. Schema, configuration, Classification Provider contract, Routing Policy, command/state, privacy, and Routed Run lifecycle tests include the Pi public-API black-box suite with in-process fake models. No external credentials, network, or paid calls are required; the workflow reads no secret and never references `OPENROUTER_API_KEY`.
+2. **Pi compatibility matrix** — `npm run test:pi-matrix`, also run as a dedicated default-CI job on Node.js `24`. It discovers the newest stable Pi version from npm at run time, installs it plus the pinned minimum into isolated directories, swaps them in one at a time, and re-runs the black-box lifecycle suite against each. See [Pi compatibility](#pi-compatibility).
 3. **Real Jev compatibility gate** — `OPENROUTER_API_KEY=... npm run test:real-jev-gate`. Credentialed, paid, probabilistic; excluded from default CI by construction and run explicitly.
 
 ### Pi compatibility
@@ -235,7 +235,7 @@ V1 uses three evidence layers:
 2. Black-box Pi public-extension-API tests with in-process fake models (`test/pi-black-box.test.ts`, driven by `test/pi-harness.ts` through the real in-process Pi SDK). The suite covers all four Routes, Automatic Routing bypass, one-shot Route Override set/replace/clear/consumption (including while Automatic Routing is off), every fail-open path (Provider unavailable, classification failure, low confidence, unavailable or unappliable Route Target), Explicit Model and Thinking Overrides, the pre-application race, queued `steer` and `followUp` continuations, restoration, next-run isolation, branch-aware entries with `/helm why`, lifecycle recovery from an incomplete checkpoint, session replacement through Pi's `AgentSessionRuntime`, footer smoke states, and silence in print, JSON, and RPC modes — asserted through behavior and state tokens, never full-text snapshots.
 3. An explicitly invoked, credentialed real OpenRouter/Jev compatibility gate (`npm run test:real-jev-gate`), evaluated per message with a two-of-three rule so no aggregate pass rate can hide a consistently failing example.
 
-External probabilistic calls are excluded from default CI. The black-box lifecycle suite is certified against the minimum and newest supported Pi versions by the executable matrix (`npm run test:pi-matrix`, see [Pi compatibility](#pi-compatibility)).
+External probabilistic calls are excluded from default CI. The deterministic suite is certified on Node.js `22.19.0` (declared minimum) and `24` by the CI matrix, and the black-box lifecycle suite is certified against the minimum and newest supported Pi versions by the executable matrix (`npm run test:pi-matrix`, see [Pi compatibility](#pi-compatibility)).
 
 ## Project documentation
 

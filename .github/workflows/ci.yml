@@ -9,14 +9,22 @@ permissions:
 
 jobs:
   deterministic:
-    name: Deterministic default suite
+    name: Deterministic default suite (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      # Every declared Node.js runtime must produce its own evidence: one
+      # failing leg must not cancel the other before it finishes.
+      fail-fast: false
+      matrix:
+        # 22.19.0 is the declared minimum (package.json engines); 24 is the
+        # current Node.js runtime. Keep this in sync with test/ci-contract.
+        node-version: [22.19.0, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run typecheck
