@@ -8,6 +8,10 @@ Pi Jev Helm is a Pi extension context for using Jev judgments to classify incomi
 The canonical project name for this extension and its repository.
 _Avoid_: pi-jev-router, Pi Jev Router
 
+**Public Preview**:
+An externally installable pre-stable release of Pi Jev Helm. Within one minor release line, patch releases preserve the user-facing configuration schema and command grammar; breaking changes require a new minor version and migration notes. Support is best-effort rather than subject to a response-time commitment.
+_Avoid_: Stable release, private build
+
 **Task Classification**:
 A structured, model-independent description of every capability required to complete an incoming user task. For a compound request, it preserves the union of required capabilities rather than only the dominant intent.
 _Avoid_: Model selection, route decision
