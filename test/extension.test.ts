@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  checkpointData,
   completeRoutes,
   createDecisionsResponse,
   deferred,
+  explanationData,
   restoreAgentDirectory,
 } from "./fixtures.js";
 import {
@@ -16,21 +18,6 @@ import {
   type FakeModel,
   type FakeSessionEntry,
 } from "./harness.js";
-
-const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
-const EXPLANATION_ENTRY_TYPE = "pi-jev-helm-routing-explanation";
-
-function typedEntryData(entries: FakeSessionEntry[], customType: string): unknown[] {
-  return entries.filter((entry) => entry.customType === customType).map((entry) => entry.data);
-}
-
-function checkpointData(entries: FakeSessionEntry[]): unknown[] {
-  return typedEntryData(entries, CHECKPOINT_ENTRY_TYPE);
-}
-
-function explanationData(entries: FakeSessionEntry[]): unknown[] {
-  return typedEntryData(entries, EXPLANATION_ENTRY_TYPE);
-}
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let agentDir: string;
@@ -85,7 +72,7 @@ describe("Pi Jev Helm extension", () => {
     const harness = createHarness();
 
     await harness.emit("session_start", { reason: "startup" });
-    expect(harness.notices).toEqual([]);
+    expect(harness.notices).toEqual([expect.objectContaining({ level: "error" })]);
 
     await harness.command("auto on");
     expect(harness.notices.at(-1)).toMatchObject({ level: "error" });
@@ -383,13 +370,16 @@ describe("Pi Jev Helm extension", () => {
     expect(harness.currentModel && modelKey(harness.currentModel)).toBe("anthropic/coding/model");
   });
 
-  it("does not emit invalid-configuration notifications in machine-readable modes", async () => {
-    const harness = createHarness("json");
+  it.each(["rpc", "json", "print"] as const)(
+    "does not emit invalid-configuration notifications in machine-readable %s mode",
+    async (mode) => {
+      const harness = createHarness(mode);
 
-    await harness.emit("session_start", { reason: "startup" });
+      await harness.emit("session_start", { reason: "startup" });
 
-    expect(harness.notices).toEqual([]);
-  });
+      expect(harness.notices).toEqual([]);
+    },
+  );
 
   it("sets, replaces, and clears the one-shot Route Override", async () => {
     await writeConfig();

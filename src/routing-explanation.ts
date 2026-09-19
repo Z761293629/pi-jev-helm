@@ -181,6 +181,23 @@ interface BranchEntry {
 }
 
 /**
+ * Select the Route of the most recent routing attempt that actually took a
+ * Route on the current branch. Attempts that failed open before selecting a
+ * Route (for example low confidence) are skipped so the result stays the last
+ * Route that was in effect, keeping the answer branch-aware like the
+ * explanation selectors.
+ */
+export function selectBranchRecentRoute(branch: readonly BranchEntry[]): Route | undefined {
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (entry?.type !== "custom" || entry.customType !== ROUTING_EXPLANATION_ENTRY_TYPE) continue;
+    if (!isRoutingExplanationEntry(entry.data) || entry.data.kind !== "routing-attempt") continue;
+    if (entry.data.route) return entry.data.route;
+  }
+  return undefined;
+}
+
+/**
  * Select the most recent applicable routing explanation on the current branch.
  * Custom entries are stored on the conversation branch, so scanning the branch
  * keeps only the explanations that apply to the selected conversation path.

@@ -2,6 +2,22 @@ import type {
   CapabilitySignalName,
   TaskClassificationV1,
 } from "../src/classification-provider.js";
+import type { FakeSessionEntry } from "./harness.js";
+
+export const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
+export const EXPLANATION_ENTRY_TYPE = "pi-jev-helm-routing-explanation";
+
+export function typedEntryData(entries: FakeSessionEntry[], customType: string): unknown[] {
+  return entries.filter((entry) => entry.customType === customType).map((entry) => entry.data);
+}
+
+export function checkpointData(entries: FakeSessionEntry[]): unknown[] {
+  return typedEntryData(entries, CHECKPOINT_ENTRY_TYPE);
+}
+
+export function explanationData(entries: FakeSessionEntry[]): unknown[] {
+  return typedEntryData(entries, EXPLANATION_ENTRY_TYPE);
+}
 
 export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;

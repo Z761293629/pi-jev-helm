@@ -12,6 +12,7 @@ import {
   CAPABILITY_SIGNAL_NAMES,
   type CapabilitySignalName,
   type ClassificationProvider,
+  type ClassificationResult,
   type TaskClassificationV1,
 } from "./classification-provider.js";
 import { loadHelmConfig, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
@@ -21,6 +22,7 @@ import {
   formatSource,
   recordRoutingExplanation,
   ROUTING_EXPLANATION_SCHEMA_VERSION,
+  selectBranchRecentRoute,
   selectBranchRoutingExplanation,
   type AttemptClassification,
   type ExplainedConfidenceCheck,
@@ -33,6 +35,7 @@ import {
 } from "./routing-explanation.js";
 
 const HELM_COMMANDS = ["auto", "route", "why"] as const;
+const HELM_STATUS_KEY = "pi-jev-helm";
 const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = 1;
 
@@ -122,6 +125,8 @@ interface HelmState {
   routeTargetApplicationRevision: number;
   helmModelSelection: HelmModelSelectionOperation | undefined;
   helmThinkingSelection: HelmThinkingSelectionOperation | undefined;
+  classificationInFlight: boolean;
+  runFailOpen: FailOpenReason | undefined;
 }
 
 function initialConfiguration(): ConfigLoadResult {
@@ -179,9 +184,60 @@ function formatStatus(state: HelmState, ctx: ExtensionContext): string {
     ...formatConfigurationHealth(state),
     "Routing capability: Automatic Routing and Route Override",
     `Pending Route Override: ${state.pendingRouteOverride ?? "none"}`,
-    `Current or recent Route: ${state.activeRoutedRun?.route ?? "none"}`,
+    `Current or recent Route: ${
+      state.activeRoutedRun?.route ??
+      selectBranchRecentRoute(ctx.sessionManager.getBranch()) ??
+      "none"
+    }`,
     `Baseline Model: ${baselineModel}`,
   ].join("\n");
+}
+
+function helmFooterText(ctx: ExtensionContext, state: HelmState): string {
+  // Footer tokens map to glossary terms: "auto"/"off" = Automatic Routing,
+  // "override <route>" = pending Route Override, "explicit" = Explicit Model
+  // Override, "fail-open" = fail-open outcome, "<route> → <model>" = active
+  // Route with its Route Target.
+  if (!state.configuration.ok) return `${HELM_STATUS_KEY}: config error`;
+  // Only an Explicit Model Override ends Helm's model control, so it is the
+  // override the footer reports; an Explicit Thinking Override keeps the
+  // Routed Run on its Route Target and stays in the routed state.
+  if (state.explicitlySupersededRun !== undefined && ctx.model) {
+    return `${HELM_STATUS_KEY}: explicit ${ctx.model.provider}/${ctx.model.id}`;
+  }
+  if (state.pendingBaselineRestoration) {
+    return state.baselineRestorationInFlight === state.pendingBaselineRestoration
+      ? `${HELM_STATUS_KEY}: restoring`
+      : `${HELM_STATUS_KEY}: restore failed`;
+  }
+  if (state.pendingCheckpointRecovery) {
+    return state.pendingCheckpointRecovery.status === "restoration_failed"
+      ? `${HELM_STATUS_KEY}: restore failed`
+      : `${HELM_STATUS_KEY}: restoring`;
+  }
+  if (state.runFailOpen) return `${HELM_STATUS_KEY}: fail-open (${state.runFailOpen})`;
+  const run = state.activeRoutedRun ?? state.pendingRouteTargetApplication;
+  if (run) {
+    const target = run.helmSelectedModel;
+    return `${HELM_STATUS_KEY}: ${run.route} → ${target.provider}/${target.id}`;
+  }
+  if (state.classificationInFlight) return `${HELM_STATUS_KEY}: classifying`;
+  if (state.pendingRouteOverride) return `${HELM_STATUS_KEY}: override ${state.pendingRouteOverride}`;
+  return `${HELM_STATUS_KEY}: ${effectiveAutomaticRouting(state) ? "auto" : "off"}`;
+}
+
+function isInteractive(ctx: ExtensionContext): boolean {
+  return ctx.mode === "tui";
+}
+
+/**
+ * Maintain the single Helm footer slot. The slot renders only in the
+ * interactive TUI; machine-readable modes keep stdout and stderr free of
+ * Helm text and rely on session entries for auditing.
+ */
+function renderHelmFooter(ctx: ExtensionContext, state: HelmState): void {
+  if (!isInteractive(ctx)) return;
+  ctx.ui.setStatus(HELM_STATUS_KEY, helmFooterText(ctx, state));
 }
 
 function configurationError(state: HelmState, action: string): string {
@@ -472,6 +528,7 @@ async function restoreTrackedBaseline(
 ): Promise<boolean> {
   state.pendingBaselineRestoration = run;
   state.baselineRestorationInFlight = run;
+  renderHelmFooter(ctx, state);
   let restored: boolean;
   try {
     restored = await restoreBaseline(pi, run, ctx, state);
@@ -567,6 +624,7 @@ async function failAfterRouteTargetApplication(
 ): Promise<void> {
   state.pendingRouteTargetApplication = undefined;
   const restored = await restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration: true, recordRestorationEntry: false });
+  state.runFailOpen = reason;
   recordAttemptExplanation(pi, ctx, attempt, run, {
     outcome: "fail-open",
     route: run.route,
@@ -574,6 +632,7 @@ async function failAfterRouteTargetApplication(
     restorationRequired: true,
   });
   recordRestorationExplanation(pi, run, restored);
+  renderHelmFooter(ctx, state);
   notifyRoutingFailure(ctx, message);
 }
 
@@ -587,7 +646,9 @@ async function finishRoutedRun(
   state.activeRoutedRun = undefined;
   if (!run) return true;
 
-  return restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration, recordRestorationEntry: true });
+  const restored = await restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration, recordRestorationEntry: true });
+  renderHelmFooter(ctx, state);
+  return restored;
 }
 
 async function prepareForNewWork(
@@ -623,23 +684,33 @@ async function beginRoutedRun(
   if (!state.configuration.ok) return;
   const { route, cancellationRevision, runId } = attempt;
   const sourceLabel = formatSource(attempt.source);
-  if (state.routeTargetApplicationRevision !== cancellationRevision) {
-    recordAttemptExplanation(pi, ctx, attempt, undefined, {
+  const failOpenAttempt = (
+    reason: FailOpenReason,
+    run: TrackedBaseline | undefined,
+    baselineRetained: boolean,
+    message?: string,
+  ): void => {
+    state.runFailOpen = reason;
+    recordAttemptExplanation(pi, ctx, attempt, run, {
       outcome: "fail-open",
       route,
-      failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: true },
+      failOpen: { reason, baselineRetained },
       restorationRequired: false,
     });
+    renderHelmFooter(ctx, state);
+    if (message !== undefined) notifyRoutingFailure(ctx, message);
+  };
+  if (state.routeTargetApplicationRevision !== cancellationRevision) {
+    failOpenAttempt("superseded-by-explicit-choice", undefined, true);
     return;
   }
   if (!ctx.model) {
-    recordAttemptExplanation(pi, ctx, attempt, undefined, {
-      outcome: "fail-open",
-      route,
-      failOpen: { reason: "baseline-unavailable", baselineRetained: false },
-      restorationRequired: false,
-    });
-    notifyRoutingFailure(ctx, `${sourceLabel} ${route} could not capture the Baseline Model`);
+    failOpenAttempt(
+      "baseline-unavailable",
+      undefined,
+      false,
+      `${sourceLabel} ${route} could not capture the Baseline Model`,
+    );
     return;
   }
 
@@ -653,13 +724,12 @@ async function beginRoutedRun(
   const target = state.configuration.config.routes[route];
   const model = findExactScopedModel(ctx, target);
   if (!model) {
-    recordAttemptExplanation(pi, ctx, attempt, run, {
-      outcome: "fail-open",
-      route,
-      failOpen: { reason: "target-unavailable", baselineRetained: true },
-      restorationRequired: false,
-    });
-    notifyRoutingFailure(ctx, `${sourceLabel} ${route} Route Target is unavailable`);
+    failOpenAttempt(
+      "target-unavailable",
+      run,
+      true,
+      `${sourceLabel} ${route} Route Target is unavailable`,
+    );
     return;
   }
 
@@ -670,17 +740,17 @@ async function beginRoutedRun(
     thinkingLevel: target.thinkingLevel,
   };
   state.pendingRouteTargetApplication = run;
+  renderHelmFooter(ctx, state);
   try {
     appendCheckpoint(pi, run, "pending");
   } catch {
     state.pendingRouteTargetApplication = undefined;
-    recordAttemptExplanation(pi, ctx, attempt, run, {
-      outcome: "fail-open",
-      route,
-      failOpen: { reason: "checkpoint-unavailable", baselineRetained: true },
-      restorationRequired: false,
-    });
-    notifyRoutingFailure(ctx, `${sourceLabel} ${route} could not store the Baseline checkpoint`);
+    failOpenAttempt(
+      "checkpoint-unavailable",
+      run,
+      true,
+      `${sourceLabel} ${route} could not store the Baseline checkpoint`,
+    );
     return;
   }
   try {
@@ -688,12 +758,14 @@ async function beginRoutedRun(
     if (state.routeTargetApplicationRevision !== cancellationRevision) {
       state.pendingRouteTargetApplication = undefined;
       const restored = await restoreTrackedBaseline(pi, run, ctx, state, { retainFailedRestoration: true, recordRestorationEntry: false });
+      state.runFailOpen = "superseded-by-explicit-choice";
       recordAttemptExplanation(pi, ctx, attempt, run, {
         outcome: "fail-open",
         route,
         failOpen: { reason: "superseded-by-explicit-choice", baselineRetained: restored },
         restorationRequired: true,
       });
+      renderHelmFooter(ctx, state);
       recordRestorationExplanation(pi, run, restored);
       return;
     }
@@ -744,6 +816,7 @@ async function beginRoutedRun(
       target: targetExplanation,
       restorationRequired: true,
     });
+    renderHelmFooter(ctx, state);
   } catch {
     await failAfterRouteTargetApplication(
       pi,
@@ -777,6 +850,9 @@ async function beginAutomaticRouting(
   let attemptRecorded = false;
   const recordFailOpen = (failOpen: ExplainedFailOpen, classification?: AttemptClassification): void => {
     attemptRecorded = true;
+    // An aborted classification ends quietly: the cancelled run leaves the
+    // footer in its idle or pending state instead of a fail-open result.
+    if (failOpen.reason !== "classification-aborted") state.runFailOpen = failOpen.reason;
     recordAttemptExplanation(pi, ctx, { ...attempt, ...(classification ? { classification } : {}) }, undefined, {
       outcome: "fail-open",
       failOpen,
@@ -789,30 +865,39 @@ async function beginAutomaticRouting(
     if (state.routeTargetApplicationRevision !== cancellationRevision) return;
     if (!classificationProvider) {
       recordFailOpen({ reason: "provider-unavailable", baselineRetained: true });
+      renderHelmFooter(ctx, state);
       notifyRoutingFailure(ctx, "Automatic Routing could not authenticate the Classification Provider");
       return;
     }
 
-    const result = await classificationProvider.classify(
-      prompt,
-      ctx.signal ? { signal: ctx.signal } : undefined,
-    );
+    state.classificationInFlight = true;
+    let result: ClassificationResult;
+    try {
+      renderHelmFooter(ctx, state);
+      result = await classificationProvider.classify(
+        prompt,
+        ctx.signal ? { signal: ctx.signal } : undefined,
+      );
+    } finally {
+      state.classificationInFlight = false;
+    }
+    renderHelmFooter(ctx, state);
     if (!result.ok) {
       const aborted = result.failure.kind === "aborted";
-      recordFailOpen({
-        reason: aborted ? "classification-aborted" : "classification-failed",
-        baselineRetained: true,
-        ...(aborted
-          ? {}
-          : {
-              classification: {
-                kind: result.failure.kind,
-                ...(result.failure.status === undefined ? {} : { status: result.failure.status }),
-              },
-            }),
-      });
       if (!aborted) {
+        recordFailOpen({
+          reason: "classification-failed",
+          baselineRetained: true,
+          classification: {
+            kind: result.failure.kind,
+            ...(result.failure.status === undefined ? {} : { status: result.failure.status }),
+          },
+        });
+        renderHelmFooter(ctx, state);
         notifyRoutingFailure(ctx, "Automatic Routing classification failed");
+      } else {
+        recordFailOpen({ reason: "classification-aborted", baselineRetained: true });
+        renderHelmFooter(ctx, state);
       }
       return;
     }
@@ -825,6 +910,7 @@ async function beginAutomaticRouting(
         { reason: "superseded-by-explicit-choice", baselineRetained: true },
         automaticClassificationDetails(state, result.classification, decision),
       );
+      renderHelmFooter(ctx, state);
       return;
     }
     if (!decision.ok) {
@@ -832,6 +918,7 @@ async function beginAutomaticRouting(
         { reason: "low-confidence", baselineRetained: true },
         automaticClassificationDetails(state, result.classification, decision),
       );
+      renderHelmFooter(ctx, state);
       return;
     }
 
@@ -850,6 +937,7 @@ async function beginAutomaticRouting(
   } catch {
     if (!attemptRecorded) {
       recordFailOpen({ reason: "unexpected-error", baselineRetained: true });
+      renderHelmFooter(ctx, state);
     }
     notifyRoutingFailure(ctx, "Automatic Routing classification failed");
   }
@@ -919,6 +1007,7 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
     }
 
     state.automaticRoutingOverride = enabled;
+    renderHelmFooter(ctx, state);
     ctx.ui.notify(`Automatic Routing is ${enabled ? "on" : "off"} for this extension instance`, "info");
     return;
   }
@@ -926,6 +1015,7 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
   if (tokens[0] === "route" && tokens.length === 2 && tokens[1] === "clear") {
     const hadPendingOverride = state.pendingRouteOverride !== undefined;
     state.pendingRouteOverride = undefined;
+    renderHelmFooter(ctx, state);
     ctx.ui.notify(hadPendingOverride ? "Pending Route Override cleared" : "No pending Route Override", "info");
     return;
   }
@@ -937,6 +1027,7 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
     }
 
     state.pendingRouteOverride = tokens[1] as Route;
+    renderHelmFooter(ctx, state);
     ctx.ui.notify(`Next Routed Run will use the ${state.pendingRouteOverride} Route Override`, "info");
     return;
   }
@@ -961,6 +1052,8 @@ export default function helmExtension(pi: ExtensionAPI): void {
     routeTargetApplicationRevision: 0,
     helmModelSelection: undefined,
     helmThinkingSelection: undefined,
+    classificationInFlight: false,
+    runFailOpen: undefined,
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -979,6 +1072,15 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.routeTargetApplicationRevision = 0;
     state.helmModelSelection = undefined;
     state.helmThinkingSelection = undefined;
+    state.classificationInFlight = false;
+    state.runFailOpen = undefined;
+
+    if (!state.configuration.ok && isInteractive(ctx)) {
+      ctx.ui.notify(
+        `Pi Jev Helm configuration is invalid: ${state.configuration.errors.join("; ")}`,
+        "error",
+      );
+    }
 
     const checkpoint = latestIncompleteCheckpoint(ctx);
     if (checkpoint) {
@@ -986,6 +1088,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
       state.checkpointRecoverySelectedModel = ctx.model;
       await attemptCheckpointRecovery(pi, ctx, state);
     }
+    renderHelmFooter(ctx, state);
   });
 
   pi.on("model_select", (event, ctx) => {
@@ -1073,6 +1176,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     } else if (!completedByExplicitOverride) {
       state.pendingBaselineRestoration = undefined;
     }
+    renderHelmFooter(ctx, state);
   });
 
   pi.on("thinking_level_select", (event, ctx) => {
@@ -1118,6 +1222,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
         override: { kind: "thinking", thinkingLevel: event.level },
         baseline: trackedBaselineRef(run),
       });
+      renderHelmFooter(ctx, state);
       return;
     }
 
@@ -1145,11 +1250,13 @@ export default function helmExtension(pi: ExtensionAPI): void {
     } catch {
       notifyRoutingFailure(ctx, "Pi Jev Helm could not update the Baseline checkpoint");
     }
+    renderHelmFooter(ctx, state);
   });
 
   pi.on("input", async (event, ctx) => {
     if (event.streamingBehavior !== undefined) return { action: "continue" };
     if (!(await prepareForNewWork(pi, state, ctx))) {
+      renderHelmFooter(ctx, state);
       notifyRoutingFailure(ctx, "Pi Jev Helm could not restore the Baseline; the request was not started");
       return { action: "handled" };
     }
@@ -1158,7 +1265,10 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
-    if (!(await prepareForNewWork(pi, state, ctx))) return;
+    if (!(await prepareForNewWork(pi, state, ctx))) {
+      renderHelmFooter(ctx, state);
+      return;
+    }
     if (state.routingAttemptedForCurrentRun) return;
 
     const currentUserMessage = state.pendingIdleUserMessage;
@@ -1187,9 +1297,14 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
+    // The run is over: drop its fail-open marker before restoration so the
+    // footer settles on the restoring/idle/pending state instead of briefly
+    // re-displaying the previous result.
+    state.runFailOpen = undefined;
     await finishRoutedRun(pi, state, ctx, true);
     state.explicitlySupersededRun = undefined;
     state.routingAttemptedForCurrentRun = false;
+    renderHelmFooter(ctx, state);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -1197,6 +1312,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.pendingIdleUserMessage = undefined;
     state.routingAttemptedForCurrentRun = false;
     state.explicitlySupersededRun = undefined;
+    state.runFailOpen = undefined;
     state.routeTargetApplicationRevision += 1;
     const pendingApplication = state.pendingRouteTargetApplication;
     state.pendingRouteTargetApplication = undefined;
@@ -1205,6 +1321,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     }
     await attemptCheckpointRecovery(pi, ctx, state);
     await finishRoutedRun(pi, state, ctx, false);
+    renderHelmFooter(ctx, state);
   });
 
   pi.registerCommand("helm", {

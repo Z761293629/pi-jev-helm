@@ -10,6 +10,7 @@ import {
   restoreAgentDirectory,
 } from "./fixtures.js";
 import { createHarness, writeHelmConfig, type FakeSessionEntry } from "./harness.js";
+import { selectBranchRecentRoute } from "../src/routing-explanation.js";
 
 const ROUTING_EXPLANATION_ENTRY_TYPE = "pi-jev-helm-routing-explanation";
 
@@ -656,5 +657,33 @@ describe("Pi Jev Helm routing explanations", () => {
     expect(notice?.message).toContain("fail-open");
     expect(notice?.message).toContain("low-confidence");
     expect(notice?.message).toContain("externalResearch");
+  });
+
+  it("selects the most recent branch-aware Route, skipping route-less fail-opens", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: true });
+    let classificationCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        classificationCount += 1;
+        return classificationCount === 1
+          ? createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 })
+          : createDecisionsResponse({ codeWork: 0.49, deepReasoning: 0.49, externalResearch: 0.49 });
+      }),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+
+    expect(selectBranchRecentRoute(harness.context.sessionManager.getBranch())).toBeUndefined();
+
+    await harness.emit("input", { text: "refactor the parser module", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "refactor the parser module" });
+    await harness.emit("agent_settled");
+    expect(selectBranchRecentRoute(harness.context.sessionManager.getBranch())).toBe("coding");
+
+    await harness.emit("input", { text: "ambiguous follow-up", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "ambiguous follow-up" });
+    await harness.emit("agent_settled");
+    expect(selectBranchRecentRoute(harness.context.sessionManager.getBranch())).toBe("coding");
   });
 });

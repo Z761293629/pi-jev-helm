@@ -60,6 +60,7 @@ export function createHarness(
   const events = new Map<string, EventHandler[]>();
   const commands = new Map<string, HelmCommand>();
   const notices: Notice[] = [];
+  const statuses: Array<{ key: string; text: string }> = [];
   const modelChanges: string[] = [];
   const thinkingLevelChanges: string[] = [];
   const sessionEntries = options.sessionEntries ?? [];
@@ -110,6 +111,9 @@ export function createHarness(
     ui: {
       notify(message: string, level = "info") {
         notices.push({ message, level });
+      },
+      setStatus(key: string, text: string | undefined) {
+        statuses.push({ key, text: text ?? "" });
       },
     },
   };
@@ -208,6 +212,7 @@ export function createHarness(
     commands,
     events,
     notices,
+    statuses,
     context,
     modelChanges,
     thinkingLevelChanges,
