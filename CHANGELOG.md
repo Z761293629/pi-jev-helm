@@ -9,7 +9,7 @@ Pi Jev Helm is distributed as a Pi Git package from immutable GitHub tags (see
 commands always reference a `v*` tag; published tags are never moved or
 deleted. A defective release is superseded by a new patch tag.
 
-## [0.1.0] — Public Preview (unreleased)
+## [0.1.0] — Public Preview (2026-09-19)
 
 First externally installable release. Pre-stable by definition: support is
 best-effort, and the next minor version may change the contract.
