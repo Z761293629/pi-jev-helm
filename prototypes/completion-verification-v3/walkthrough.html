@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Helm Completion Verification — Experience Walkthrough</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--blue:#58a6ff;--green:#3fb950;--orange:#d29922;--purple:#bc8cff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif}button{font:inherit}
+header{padding:22px 28px 18px;border-bottom:1px solid var(--line)}h1{margin:2px 0 6px;font-size:22px}.warning{color:var(--orange);font-weight:800}.muted{color:var(--muted)}
+.guide{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px}.guide b{color:var(--blue)}
+nav{display:flex;gap:8px;overflow:auto;padding:14px 28px;border-bottom:1px solid var(--line)}nav button,.secondary{white-space:nowrap;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 11px;cursor:pointer}nav button.active{border-color:var(--blue);color:var(--blue)}
+main{padding:18px 28px 36px}.scenario{padding:14px 16px;margin-bottom:16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.scenario h2{font-size:16px;margin:0 0 5px}.comparison{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.column{display:flex;flex-direction:column;min-height:500px;background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}.column.recommended{border-color:var(--blue)}
+.column header{padding:14px 16px;background:#11161d;border-bottom:1px solid var(--line)}.column h2{margin:0;font-size:16px}.column .promise{min-height:42px;color:var(--muted);font-size:13px;margin-top:4px}.chat{display:flex;flex:1;flex-direction:column;gap:10px;padding:14px}.bubble{border-radius:10px;padding:10px 12px;white-space:pre-wrap}.user{background:#1f3a5f;margin-left:18px}.agent{background:#20262e;margin-right:18px}.helm{border:1px solid currentColor;background:transparent}.editor{border:1px dashed var(--blue);background:#0b1726;color:var(--text)}.editor strong{color:var(--blue)}.continue{color:var(--blue)}.blocked{color:var(--orange)}.inconclusive{color:var(--purple)}.complete{color:var(--green)}
+.action{padding:12px 14px;border-top:1px solid var(--line)}.primary{width:100%;background:var(--blue);color:#07111f;border:0;border-radius:8px;padding:9px 12px;font-weight:800;cursor:pointer}.primary:disabled{opacity:.5}.outcome{margin-top:9px;color:var(--muted);font-size:13px;min-height:38px}
+.verdict{margin-top:18px;padding:16px;background:var(--panel);border:1px solid var(--line);border-radius:10px}.verdict h2{margin:0 0 8px;font-size:16px}.choices{display:flex;gap:8px;flex-wrap:wrap}.choices button.selected{border-color:var(--green);color:var(--green)}
+@media(max-width:980px){.comparison{grid-template-columns:1fr}.column{min-height:0}.column .promise{min-height:0}main,header,nav{padding-left:14px;padding-right:14px}}
+</style>
+</head>
+<body>
+<header>
+<div class="warning">THROWAWAY EXPERIENCE PROTOTYPE</div>
+<h1>只比较一件事：agent 说“完成”后，Helm 应该怎么做？</h1>
+<div class="muted">这不是配置面板，也不要求理解 confidence、F1 或状态机。请选择一个场景，比较“不处理、只提醒、填入输入框”三种体验。</div>
+<div class="guide"><span><b>1.</b> 选择场景</span><span><b>2.</b> 播放三种体验</span><span><b>3.</b> 选择你真正想用的模式</span></div>
+</header>
+<nav id="tabs"></nav>
+<main>
+<section class="scenario"><h2 id="scenarioTitle"></h2><div id="scenarioWhy" class="muted"></div></section>
+<section class="comparison" id="comparison"></section>
+<section class="verdict">
+<h2>在这个场景里，你更希望哪一种？</h2>
+<div class="choices" id="choices"><button class="secondary" data-choice="none">保持 Pi 原样</button><button class="secondary" data-choice="shadow">只提醒我</button><button class="secondary" data-choice="draft">填到输入框</button></div>
+<div id="choiceText" class="muted" style="margin-top:8px">这里只存在内存里，不会上传或保存。</div>
+</section>
+</main>
+<script>
+const scenarios=[
+{id:'code',label:'代码没验证',title:'修改后没有重新运行测试',why:'这是 pi-warden 已覆盖的窄场景，也是最容易理解的基线。',request:'修复缓存键分隔符，并确认缓存测试通过。',final:'分隔符已更新，测试通过。',helm:'continue',notice:'Helm：尚未完成——测试发生在最后一次修改之前。',follow:'请重新运行相关测试；如果无法运行，请明确说明。',resolved:'重新运行了缓存测试：12 项全部通过。任务现在完成。'},
+{id:'research',label:'研究漏一项',title:'回答只覆盖了复合请求的一半',why:'这是 Helm 相对单纯 Done Check 的潜在差异化。',request:'查明东区和西区的生效日期，并分别引用官方来源。',final:'东区于 6 月 1 日生效【东区公告 §2】。',helm:'continue',notice:'Helm：尚未完成——西区日期和来源仍缺失。',follow:'请继续完成遗漏的西区日期和官方来源。',resolved:'补充：西区于 7 月 15 日生效【西区公告 §4】。'},
+{id:'blocked',label:'确实被阻塞',title:'剩余工作必须由用户完成',why:'正确行为是说明需要什么，然后安静停止，不能让 agent 空转。',request:'构建发布包，并使用已注册的物理令牌签名。',final:'发布包已构建，但未检测到签名令牌；请连接令牌。',helm:'blocked',notice:'Helm：等待外部操作——需要你连接已注册的签名令牌。',follow:'',resolved:''},
+{id:'unclear',label:'证据冲突',title:'Helm 自己也无法可靠判断',why:'正确行为是承认不确定，不应自动继续，也不能显示“已完成”。',request:'重新生成客户端，并确认工作区只包含预期文件。',final:'客户端已重新生成，工作区干净。',helm:'inconclusive',notice:'Helm：无法判断——两份工作区证据互相冲突。',follow:'',resolved:''},
+{id:'complete',label:'正常完成',title:'请求确实已经完成',why:'理想情况下，用户不应因为成功验证而多看一条消息。',request:'把“名称：灯塔；状态：暂停”转换成只含这两个字段的 JSON。',final:'{"名称":"灯塔","状态":"暂停"}',helm:'complete',notice:'',follow:'',resolved:''},
+{id:'low',label:'低置信度保护',title:'Jev 原始选择错了，但自己也没有把握',why:'V3 的真实 h03 模式：原始 Choice 是 complete，confidence 低于阈值后变成 inconclusive。',request:'用最多八个英文单词描述自动合并重复通知的功能。',final:'This helpful feature automatically groups duplicate notices together for users.',helm:'inconclusive',notice:'Helm：无法判断——判断置信度不足；不会生成草稿。',follow:'',resolved:''}
+];
+const modes=[
+{id:'none',title:'A · 保持 Pi 原样',promise:'agent 结束就结束。没有第二意见，也没有额外消息。'},
+{id:'shadow',title:'B · Shadow',promise:'Helm 显示一次判断，但不替你采取行动。'},
+{id:'draft',title:'C · Continuation Draft',promise:'只有 continue 会把建议放进空输入框；不会发送，也不会启动下一轮。'}
+];
+let current=scenarios[0],played={};
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function actionText(mode,s){if(mode==='none')return'Pi 已 settled。由你自己发现是否有遗漏。';if(mode==='shadow')return s.helm==='complete'?'Pi 已 settled；Helm 保持安静，只留下本地记录。':'Pi 已 settled；Helm 提醒后等待你决定。';if(s.helm==='continue')return'Pi 已 settled；建议停在输入框中，由你编辑、发送或删除。';if(s.helm==='blocked')return'Pi 已 settled；等待你完成外部操作，不生成草稿。';if(s.helm==='complete')return'Pi 已 settled；没有额外可见消息。';return'Pi 已 settled；不确定时不生成草稿。'}
+function extra(mode,s){if(mode==='none'||!played[mode])return'';if(mode==='shadow')return s.helm==='complete'?'':`<div class="bubble helm ${s.helm}">${esc(s.notice)}</div>`;if(s.helm==='continue')return `<div class="bubble helm continue">${esc(s.notice)}</div><div class="bubble editor"><strong>Pi 输入框（尚未发送）</strong>\n${esc(s.follow)}\n\n你可以编辑、按 Enter 发送，或清空忽略。</div>`;return s.helm==='complete'?'':`<div class="bubble helm ${s.helm}">${esc(s.notice)}</div>`;}
+function render(){document.querySelectorAll('#tabs button').forEach(b=>b.classList.toggle('active',b.dataset.id===current.id));document.querySelector('#scenarioTitle').textContent=current.title;document.querySelector('#scenarioWhy').textContent=current.why;document.querySelector('#comparison').innerHTML=modes.map(m=>`<article class="column ${m.id==='draft'?'recommended':''}"><header><h2>${m.title}</h2><div class="promise">${m.promise}</div></header><div class="chat"><div class="bubble user">${esc(current.request)}</div><div class="bubble agent">${esc(current.final)}</div>${extra(m.id,current)}</div><div class="action"><button class="primary" data-play="${m.id}" ${played[m.id]?'disabled':''}>${played[m.id]?'已播放':'播放这种体验'}</button><div class="outcome">${played[m.id]?esc(actionText(m.id,current)):'点击后观察用户会多看到什么，以及是否继续运行。'}</div></div></article>`).join('');document.querySelectorAll('[data-play]').forEach(b=>b.onclick=()=>{played[b.dataset.play]=true;render()})}
+function selectScenario(s){current=s;played={};document.querySelector('#choiceText').textContent='这里只存在内存里，不会上传或保存。';document.querySelectorAll('[data-choice]').forEach(b=>b.classList.remove('selected'));render()}
+document.querySelector('#tabs').innerHTML=scenarios.map(s=>`<button data-id="${s.id}">${s.label}</button>`).join('');document.querySelectorAll('#tabs button').forEach(b=>b.onclick=()=>selectScenario(scenarios.find(s=>s.id===b.dataset.id)));document.querySelectorAll('[data-choice]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-choice]').forEach(x=>x.classList.toggle('selected',x===b));document.querySelector('#choiceText').textContent=`你在“${current.label}”场景选择了：${b.textContent}。请把真实感受告诉我。`});render();
+</script>
+</body>
+</html>
