@@ -2,9 +2,14 @@
 // Executable Pi compatibility matrix for Pi Jev Helm.
 //
 // Certifies the public-API black-box suite (test/pi-black-box.test.ts) against:
-//   - the minimum supported Pi version (MINIMUM_PI_VERSION), and
+//   - the minimum supported Pi version (MINIMUM_PI_VERSION), taken from the
+//     exact @earendil-works/pi-coding-agent dev dependency pin — the single
+//     source of the matrix minimum (the host-facing peer dependency is a
+//     wildcard and encodes no version policy), and
 //   - the newest stable Pi version published to npm (dist-tag `latest`,
 //     discovered at run time rather than assumed).
+//
+// The two targets are deduplicated, so every distinct version runs exactly once.
 //
 // For every distinct target version the script installs that version into an
 // isolated directory, temporarily points the repository's @earendil-works
@@ -23,11 +28,11 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MATRIX_DIR = join(REPO_ROOT, ".pi-matrix");
 const MAIN_PACKAGE = "@earendil-works/pi-coding-agent";
-const PEER_RANGE = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"))
-  .peerDependencies?.[MAIN_PACKAGE];
-const MINIMUM_PI_VERSION = /^\^(\d+\.\d+\.\d+)$/.exec(PEER_RANGE)?.[1];
+const DEV_PIN = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"))
+  .devDependencies?.[MAIN_PACKAGE];
+const MINIMUM_PI_VERSION = /^(\d+\.\d+\.\d+)$/.exec(DEV_PIN)?.[1];
 if (!MINIMUM_PI_VERSION) {
-  throw new Error(`expected ${MAIN_PACKAGE} peer dependency to be a caret range, received: ${PEER_RANGE}`);
+  throw new Error(`expected ${MAIN_PACKAGE} dev dependency to be an exact version, received: ${DEV_PIN}`);
 }
 const SWAPPED_PACKAGES = ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai"];
 const BACKUP_SUFFIX = ".pi-matrix-backup";
