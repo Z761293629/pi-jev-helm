@@ -3,6 +3,7 @@ import {
   CLASSIFICATION_TEMPLATE_VERSION,
   type ClassificationResult,
 } from "./classification-provider.js";
+import { TYPESAFE_CLASSIFICATION_MODEL } from "./typesafe-jev-client.js";
 import {
   CLASSIFICATION_CORPUS,
   CLASSIFICATION_CORPUS_MANIFEST,
@@ -15,39 +16,101 @@ import {
 import { selectRoute } from "./routing-policy.js";
 
 /**
- * Real OpenRouter/Jev compatibility gate.
+ * Real Jev compatibility gate, one leg per Jev Client.
  *
  * The gate validates the live Jev service against the versioned
- * classification corpus. It is never run by default CI: it must be invoked
- * explicitly with `npm run test:real-jev-gate` while OpenRouter credentials
- * are present in the environment, and it performs paid external requests.
+ * classification corpus — an OpenRouter leg through the OpenRouter Jev Client
+ * (`typesafe/jev-1.13`) and a TypeSafe leg through the official TypeSafe SDK
+ * (`jev-1.13.0`) — under the same corpus, confidence threshold, execution
+ * count, and per-message two-of-three rule. Each leg runs only when its own
+ * credential (`OPENROUTER_API_KEY` / `TYPESAFE_API_KEY`) is present; a missing
+ * credential skips its leg explicitly instead of passing it. The gate is
+ * never run by default CI: it must be invoked explicitly with
+ * `npm run test:real-jev-gate` and performs paid external requests.
  */
 
-export const REAL_JEV_GATE_MODEL = CLASSIFICATION_MODEL;
+/** The OpenRouter leg's fixed model identity (`typesafe/jev-1.13`). */
+export const REAL_JEV_GATE_OPENROUTER_MODEL = CLASSIFICATION_MODEL;
+export const REAL_JEV_GATE_TYPESAFE_MODEL = TYPESAFE_CLASSIFICATION_MODEL;
 export const REAL_JEV_GATE_CONFIDENCE_THRESHOLD = 0.75;
 export const REAL_JEV_GATE_EXECUTIONS_PER_MESSAGE = 3;
 export const REAL_JEV_GATE_REQUIRED_PASSES = 2;
 export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
+export const TYPESAFE_API_KEY_ENV = "TYPESAFE_API_KEY";
 
 export type RealJevGateCredentialResolution =
   | { ok: true; apiKey: string }
   | { ok: false; error: string };
 
-/** Resolves the gate credential from an explicit environment mapping. Pure; no network access. */
-export function resolveRealJevGateApiKey(
+function resolveGateCredential(
+  envVarName: string,
+  missingCredentialError: string,
   env: Readonly<Record<string, string | undefined>>,
 ): RealJevGateCredentialResolution {
-  const apiKey = env[OPENROUTER_API_KEY_ENV];
-  if (apiKey === undefined || apiKey.trim().length === 0) {
-    return {
-      ok: false,
-      error:
-        `The real Jev compatibility gate requires credentials: set ${OPENROUTER_API_KEY_ENV} in the environment, ` +
-        "then invoke the gate explicitly with: npm run test:real-jev-gate. " +
-        "The gate performs paid external OpenRouter requests and is never run by default CI or npm test.",
-    };
-  }
+  const apiKey = env[envVarName];
+  if (apiKey === undefined || apiKey.trim().length === 0) return { ok: false, error: missingCredentialError };
   return { ok: true, apiKey };
+}
+
+/** Resolves the OpenRouter leg's credential from an explicit environment mapping. Pure; no network access. */
+export function resolveRealJevGateOpenRouterApiKey(
+  env: Readonly<Record<string, string | undefined>>,
+): RealJevGateCredentialResolution {
+  return resolveGateCredential(
+    OPENROUTER_API_KEY_ENV,
+    `The real Jev compatibility gate requires credentials for its OpenRouter leg: set ${OPENROUTER_API_KEY_ENV} in the environment, ` +
+      "then invoke the gate explicitly with: npm run test:real-jev-gate. " +
+      "The OpenRouter leg performs paid external OpenRouter requests and is never run by default CI or npm test.",
+    env,
+  );
+}
+
+/** Resolves the TypeSafe leg's credential from an explicit environment mapping. Pure; no network access. */
+export function resolveRealJevGateTypesafeApiKey(
+  env: Readonly<Record<string, string | undefined>>,
+): RealJevGateCredentialResolution {
+  return resolveGateCredential(
+    TYPESAFE_API_KEY_ENV,
+    `The real Jev compatibility gate requires credentials for its TypeSafe leg: set ${TYPESAFE_API_KEY_ENV} in the environment, ` +
+      "then invoke the gate explicitly with: npm run test:real-jev-gate. " +
+      "The TypeSafe leg performs paid external TypeSafe requests against the pinned jev-1.13.0 model and is never run by default CI or npm test.",
+    env,
+  );
+}
+
+/** Per-leg credential resolutions for the real Jev compatibility gate. */
+export interface RealJevGateLegCredentials {
+  openrouter: RealJevGateCredentialResolution;
+  typesafe: RealJevGateCredentialResolution;
+}
+
+/** Resolves both legs' credentials from an explicit environment mapping. Pure; no network access. */
+export function resolveRealJevGateLegCredentials(
+  env: Readonly<Record<string, string | undefined>>,
+): RealJevGateLegCredentials {
+  return {
+    openrouter: resolveRealJevGateOpenRouterApiKey(env),
+    typesafe: resolveRealJevGateTypesafeApiKey(env),
+  };
+}
+
+/**
+ * Returns why the explicit gate invocation cannot certify any leg and must
+ * fail its collection before any network access: with no usable credential
+ * for either leg, every leg would be skipped and the run would pass without
+ * producing any certification evidence.
+ */
+export function findRealJevGateCredentialError(
+  legs: RealJevGateLegCredentials,
+): string | undefined {
+  if (legs.openrouter.ok || legs.typesafe.ok) return undefined;
+  return (
+    `The real Jev compatibility gate requires credentials for at least one leg: set ${OPENROUTER_API_KEY_ENV} ` +
+    `to certify the OpenRouter leg and/or ${TYPESAFE_API_KEY_ENV} to certify the TypeSafe leg, ` +
+    "then invoke the gate explicitly with: npm run test:real-jev-gate. " +
+    "The gate performs paid external requests and is never run by default CI or npm test; " +
+    "a leg without its credential is skipped, so a run without any credential certifies nothing."
+  );
 }
 
 export interface RealJevGateExecutionVerdict {
