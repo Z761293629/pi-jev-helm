@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>路由评测协议模拟器 — PROTOTYPE</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #18201d;
+      --muted: #65706a;
+      --line: #d9dfdb;
+      --panel: #f6f8f6;
+      --accent: #176b4d;
+      --accent-soft: #e3f1eb;
+      --danger: #a13b2f;
+      --warn: #8a5a10;
+      --blue: #315c9e;
+      --white: #fff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #eef2ef;
+      color: var(--ink);
+      font: 15px/1.55 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+    h1, h2, h3 { line-height: 1.2; margin: 0; }
+    h1 { font-size: clamp(26px, 4vw, 42px); letter-spacing: -0.03em; }
+    h2 { font-size: 20px; margin-bottom: 14px; }
+    h3 { font-size: 15px; margin-bottom: 8px; }
+    p { margin: 8px 0; }
+    code { background: #e8ece9; padding: 1px 5px; border-radius: 4px; }
+    .eyebrow { color: var(--accent); font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .intro { max-width: 860px; color: #3e4944; font-size: 17px; }
+    .warning {
+      margin: 18px 0 24px;
+      padding: 12px 14px;
+      border: 1px solid #d8b777;
+      background: #fff8e8;
+      color: #68450e;
+      border-radius: 10px;
+      font-weight: 650;
+    }
+    .grid { display: grid; gap: 16px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .panel {
+      background: var(--white);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 4px 18px rgba(32, 53, 44, .05);
+    }
+    .decision {
+      border-width: 2px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      margin: 20px 0 16px;
+    }
+    .decision[data-tone="good"] { border-color: #5ca985; background: #f4fbf7; }
+    .decision[data-tone="warn"] { border-color: #d3a54f; background: #fffaf0; }
+    .decision[data-tone="bad"] { border-color: #d18378; background: #fff6f4; }
+    .decision[data-tone="neutral"] { border-color: #9ba7a1; }
+    .decision-title { font-size: 26px; font-weight: 850; letter-spacing: -0.02em; }
+    .decision-badge {
+      border-radius: 999px;
+      padding: 8px 13px;
+      font-weight: 850;
+      color: white;
+      background: var(--accent);
+      white-space: nowrap;
+    }
+    [data-tone="warn"] .decision-badge { background: var(--warn); }
+    [data-tone="bad"] .decision-badge { background: var(--danger); }
+    [data-tone="neutral"] .decision-badge { background: #69756f; }
+    .metric { padding: 12px; background: var(--panel); border-radius: 10px; }
+    .metric strong { display: block; font-size: 22px; }
+    .metric small { color: var(--muted); }
+    .gate-list { display: grid; gap: 8px; margin-top: 12px; }
+    .gate { display: flex; gap: 8px; align-items: flex-start; }
+    .gate .mark { width: 22px; flex: 0 0 22px; font-weight: 900; }
+    .gate.pass .mark { color: var(--accent); }
+    .gate.fail .mark { color: var(--danger); }
+    .gate.wait .mark { color: var(--warn); }
+    button {
+      appearance: none;
+      border: 1px solid #b9c4be;
+      background: white;
+      color: var(--ink);
+      border-radius: 9px;
+      padding: 9px 12px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.danger { color: var(--danger); border-color: #d7aaa4; }
+    button:disabled { opacity: .42; cursor: not-allowed; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    .button-stack { display: grid; gap: 8px; }
+    .section { margin-top: 18px; }
+    .state-table { width: 100%; border-collapse: collapse; }
+    .state-table th, .state-table td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: right; }
+    .state-table th:first-child, .state-table td:first-child { text-align: left; }
+    .state-table th { color: var(--muted); font-size: 12px; }
+    .protocol { counter-reset: protocol; display: grid; gap: 10px; }
+    .protocol-item { display: grid; grid-template-columns: 30px 1fr; gap: 10px; }
+    .protocol-item::before {
+      counter-increment: protocol;
+      content: counter(protocol);
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 850;
+    }
+    .tabs { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 14px; }
+    .tab.active { background: #22312b; color: white; border-color: #22312b; }
+    .walkthrough { min-height: 210px; }
+    .walkthrough-steps { display: grid; gap: 9px; margin-top: 15px; }
+    .walkthrough-step { display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: center; }
+    .step-no { color: var(--muted); font-weight: 850; }
+    .done { color: var(--accent); }
+    .log { color: var(--muted); font-size: 13px; min-height: 22px; }
+    .legend { color: var(--muted); font-size: 13px; }
+    .full-state { white-space: pre-wrap; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: #111814; color: #d9e7df; padding: 14px; border-radius: 10px; overflow: auto; max-height: 340px; }
+    @media (max-width: 800px) {
+      .grid.two, .grid.three { grid-template-columns: 1fr; }
+      .decision { grid-template-columns: 1fr; }
+      .decision-badge { justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Throwaway logic prototype</div>
+  <h1>路由评测协议模拟器</h1>
+  <p class="intro">
+    这个原型回答一个问题：当候选路由可能修正首次误判、处理 Capability Drift，
+    同时又可能因模型切换损失 Prompt Cache 时，什么证据足以判定它优于当前 Helm？
+  </p>
+  <div class="warning">原型，不是生产实现。双击本文件即可运行；所有状态只存在内存中。</div>
+
+  <section id="decision" class="panel decision" data-tone="neutral"></section>
+
+  <section class="grid three" id="metrics"></section>
+
+  <section class="grid two section">
+    <div class="panel">
+      <h2>完整当前状态</h2>
+      <div id="state-view"></div>
+      <p class="log" id="last-action"></p>
+    </div>
+    <div class="panel">
+      <h2>协议草案</h2>
+      <div class="protocol">
+        <div class="protocol-item"><div><strong>配对执行</strong><br>同一冻结任务轨迹分别运行当前 Helm 与候选方案；随机标为 A/B。</div></div>
+        <div class="protocol-item"><div><strong>整任务盲评</strong><br>盲评单位是完整任务结果，不是某个 Turn。平局保留报告，但从候选胜率的 95% Wilson 区间中排除。</div></div>
+        <div class="protocol-item"><div><strong>客观检查</strong><br>测试、引用、约束满足等必须非劣；新增关键失败直接否决。</div></div>
+        <div class="protocol-item"><div><strong>分层检查</strong><br>首次分类错误与 Capability Drift 分开报告；任何一层出现显著伤害都不能被总体平均掩盖。</div></div>
+        <div class="protocol-item"><div><strong>经济护栏</strong><br>平均总费用与 p95 延迟分别不得超过基线 20%；费用包含 cache read/write、预热和分类。</div></div>
+        <div class="protocol-item"><div><strong>最终判定</strong><br>质量显著提升且所有护栏通过才采用；质量与美元不直接相减。</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel section">
+    <h2>自由试验</h2>
+    <p class="legend">每次增加 5 个案例或调整候选指标。观察“采用 / 暂缓 / 否决 / 证据不足”如何变化。</p>
+    <div class="grid three">
+      <div>
+        <h3>首次分类错误样本</h3>
+        <div class="button-row">
+          <button data-action="add-result" data-mode="initial" data-result="wins">+5 候选胜</button>
+          <button data-action="add-result" data-mode="initial" data-result="losses">+5 基线胜</button>
+          <button data-action="add-result" data-mode="initial" data-result="ties">+5 平局</button>
+        </div>
+      </div>
+      <div>
+        <h3>Capability Drift 样本</h3>
+        <div class="button-row">
+          <button data-action="add-result" data-mode="drift" data-result="wins">+5 候选胜</button>
+          <button data-action="add-result" data-mode="drift" data-result="losses">+5 基线胜</button>
+          <button data-action="add-result" data-mode="drift" data-result="ties">+5 平局</button>
+        </div>
+      </div>
+      <div>
+        <h3>客观检查</h3>
+        <div class="button-row">
+          <button data-action="objective" data-delta="1">候选通过率 +1pp</button>
+          <button data-action="objective" data-delta="-1">候选通过率 −1pp</button>
+          <button class="danger" data-action="critical">切换关键回退</button>
+        </div>
+      </div>
+    </div>
+    <div class="grid two section">
+      <div>
+        <h3>平均总费用</h3>
+        <div class="button-row">
+          <button data-action="cost" data-delta="-0.05">候选费用 −5%</button>
+          <button data-action="cost" data-delta="0.05">候选费用 +5%</button>
+        </div>
+      </div>
+      <div>
+        <h3>p95 延迟</h3>
+        <div class="button-row">
+          <button data-action="latency" data-delta="-0.05">候选延迟 −5%</button>
+          <button data-action="latency" data-delta="0.05">候选延迟 +5%</button>
+          <button data-action="reset" class="danger">重置自由试验</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel section walkthrough">
+    <h2>引导场景</h2>
+    <div class="tabs" id="scenario-tabs"></div>
+    <div id="scenario-body"></div>
+  </section>
+
+  <details class="panel section">
+    <summary><strong>查看机器状态</strong></summary>
+    <pre class="full-state" id="json-state"></pre>
+  </details>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// Portable logic module: no DOM access. This is the part worth discussing.
+// ---------------------------------------------------------------------------
+const Protocol = (() => {
+  const z = 1.96;
+  const emptyEvidence = () => ({ wins: 0, losses: 0, ties: 0 });
+  const initialState = () => ({
+    evidence: { initial: emptyEvidence(), drift: emptyEvidence() },
+    objective: { total: 0, baselinePasses: 0, candidatePasses: 0, criticalRegressions: 0 },
+    economics: { baselineAvgCost: 1, candidateAvgCost: 1, baselineP95: 10, candidateP95: 10 },
+    thresholds: {
+      confidence: 0.95,
+      minDecisivePerMode: 20,
+      objectiveTolerance: 0.02,
+      maxCostRatio: 1.20,
+      maxLatencyRatio: 1.20,
+    },
+    loaded: { quality: false, objective: false, economics: false },
+    lastAction: "等待证据",
+    scenario: null,
+  });
+
+  function wilson(successes, total) {
+    if (!total) return { low: 0, high: 1, estimate: 0 };
+    const p = successes / total;
+    const denominator = 1 + (z * z) / total;
+    const center = (p + (z * z) / (2 * total)) / denominator;
+    const margin = (z / denominator) * Math.sqrt((p * (1 - p) / total) + (z * z) / (4 * total * total));
+    return { low: Math.max(0, center - margin), high: Math.min(1, center + margin), estimate: p };
+  }
+
+  function summarizeMode(mode) {
+    const decisive = mode.wins + mode.losses;
+    return { ...mode, decisive, ...wilson(mode.wins, decisive) };
+  }
+
+  function evaluate(state) {
+    const initial = summarizeMode(state.evidence.initial);
+    const drift = summarizeMode(state.evidence.drift);
+    const total = summarizeMode({
+      wins: initial.wins + drift.wins,
+      losses: initial.losses + drift.losses,
+      ties: initial.ties + drift.ties,
+    });
+    const modes = [initial, drift];
+    const coveragePass = modes.every((m) => m.decisive >= state.thresholds.minDecisivePerMode);
+    const significantQualityWin = total.low > 0.5;
+    const significantModeHarm = modes.some((m) => m.decisive > 0 && m.high < 0.5);
+
+    const objectiveBaselineRate = state.objective.total ? state.objective.baselinePasses / state.objective.total : 0;
+    const objectiveCandidateRate = state.objective.total ? state.objective.candidatePasses / state.objective.total : 0;
+    const objectivePass = state.objective.total > 0 &&
+      state.objective.criticalRegressions === 0 &&
+      objectiveCandidateRate + state.thresholds.objectiveTolerance >= objectiveBaselineRate;
+
+    const costRatio = state.economics.candidateAvgCost / state.economics.baselineAvgCost;
+    const latencyRatio = state.economics.candidateP95 / state.economics.baselineP95;
+    const costPass = costRatio <= state.thresholds.maxCostRatio + 1e-9;
+    const latencyPass = latencyRatio <= state.thresholds.maxLatencyRatio + 1e-9;
+    const complete = Object.values(state.loaded).every(Boolean);
+
+    let status = "incomplete";
+    let title = "等待完整证据";
+    let reason = "依次加入盲评、客观检查和经济数据。";
+    if (complete) {
+      if (state.objective.criticalRegressions > 0 || significantModeHarm || !objectivePass) {
+        status = "reject";
+        title = "否决候选方案";
+        reason = state.objective.criticalRegressions > 0
+          ? "出现新增关键客观失败。"
+          : significantModeHarm
+            ? "某个失效模式出现显著伤害，不能被总体均值掩盖。"
+            : "客观检查低于允许的非劣界限。";
+      } else if (!coveragePass || !significantQualityWin) {
+        status = "inconclusive";
+        title = "证据不足";
+        reason = !coveragePass
+          ? "首次误判或 Capability Drift 的决定性样本不足。"
+          : "候选胜率的 95% 区间仍未排除持平。";
+      } else if (!costPass || !latencyPass) {
+        status = "hold";
+        title = "质量胜出，但经济护栏失败";
+        reason = `${!costPass ? "平均总费用" : ""}${!costPass && !latencyPass ? "与" : ""}${!latencyPass ? "p95 延迟" : ""}超过 20% 护栏；本协议不把质量分数直接换算成美元。`;
+      } else {
+        status = "adopt";
+        title = "采用候选方案";
+        reason = "质量显著提升，两个失效模式无显著伤害，客观检查与经济护栏全部通过。";
+      }
+    }
+
+    return {
+      status, title, reason, complete,
+      modes: { initial, drift, total },
+      gates: { coveragePass, significantQualityWin, significantModeHarm, objectivePass, costPass, latencyPass },
+      objective: { baselineRate: objectiveBaselineRate, candidateRate: objectiveCandidateRate },
+      economics: { costRatio, latencyRatio },
+    };
+  }
+
+  function reducer(state, action) {
+    const next = structuredClone(state);
+    if (action.type === "RESET") return initialState();
+    if (action.type === "ADD_RESULT") {
+      next.evidence[action.mode][action.result] += action.amount ?? 5;
+      next.loaded.quality = true;
+      next.lastAction = `${action.mode === "initial" ? "首次误判" : "Capability Drift"}：增加 ${action.amount ?? 5} 个${action.result === "wins" ? "候选胜" : action.result === "losses" ? "基线胜" : "平局"}`;
+      return next;
+    }
+    if (action.type === "ADJUST_OBJECTIVE") {
+      if (!next.objective.total) {
+        next.objective = { total: 100, baselinePasses: 95, candidatePasses: 95, criticalRegressions: 0 };
+      }
+      next.objective.candidatePasses = Math.max(0, Math.min(next.objective.total, next.objective.candidatePasses + action.delta));
+      next.loaded.objective = true;
+      next.lastAction = `候选客观通过数 ${action.delta > 0 ? "+" : ""}${action.delta}`;
+      return next;
+    }
+    if (action.type === "TOGGLE_CRITICAL") {
+      next.objective.total ||= 100;
+      next.objective.baselinePasses ||= 95;
+      next.objective.candidatePasses ||= 95;
+      next.objective.criticalRegressions = next.objective.criticalRegressions ? 0 : 1;
+      next.loaded.objective = true;
+      next.lastAction = next.objective.criticalRegressions ? "加入 1 个关键回退" : "清除关键回退";
+      return next;
+    }
+    if (action.type === "ADJUST_ECONOMICS") {
+      if (action.field === "candidateAvgCost") {
+        next.economics.candidateAvgCost = Math.max(.1, next.economics.candidateAvgCost + next.economics.baselineAvgCost * action.delta);
+      } else {
+        next.economics.candidateP95 = Math.max(.1, next.economics.candidateP95 + next.economics.baselineP95 * action.delta);
+      }
+      next.loaded.economics = true;
+      next.lastAction = `${action.field === "candidateAvgCost" ? "候选平均总费用" : "候选 p95 延迟"} ${action.delta > 0 ? "+" : ""}${Math.round(action.delta * 100)}% 基线`;
+      return next;
+    }
+    if (action.type === "LOAD_STAGE") {
+      const preset = action.preset;
+      next.scenario = action.scenario;
+      if (action.stage === "quality") {
+        next.evidence = structuredClone(preset.evidence);
+        next.loaded.quality = true;
+        next.lastAction = "加载盲评结果";
+      }
+      if (action.stage === "objective") {
+        next.objective = structuredClone(preset.objective);
+        next.loaded.objective = true;
+        next.lastAction = "加载客观检查";
+      }
+      if (action.stage === "economics") {
+        next.economics = structuredClone(preset.economics);
+        next.loaded.economics = true;
+        next.lastAction = "加载成本与延迟";
+      }
+      return next;
+    }
+    if (action.type === "START_SCENARIO") {
+      const fresh = initialState();
+      fresh.scenario = action.scenario;
+      fresh.lastAction = `开始场景：${action.scenario}`;
+      return fresh;
+    }
+    return next;
+  }
+
+  return { initialState, reducer, evaluate };
+})();
+
+// ---------------------------------------------------------------------------
+// Throwaway page shell.
+// ---------------------------------------------------------------------------
+const scenarios = [
+  {
+    id: "win",
+    name: "真实胜出",
+    description: "候选同时修正首次误判和 Capability Drift，客观检查非劣，缓存成本计入后仍在护栏内。",
+    preset: {
+      evidence: { initial: { wins: 55, losses: 25, ties: 20 }, drift: { wins: 38, losses: 17, ties: 10 } },
+      objective: { total: 165, baselinePasses: 154, candidatePasses: 157, criticalRegressions: 0 },
+      economics: { baselineAvgCost: 1, candidateAvgCost: 1.14, baselineP95: 10, candidateP95: 11.1 },
+    },
+  },
+  {
+    id: "cache",
+    name: "缓存代价过高",
+    description: "质量明显更好，但中途换模型导致 cache write 和未命中，使平均总费用超过 20%。",
+    preset: {
+      evidence: { initial: { wins: 58, losses: 22, ties: 20 }, drift: { wins: 40, losses: 15, ties: 10 } },
+      objective: { total: 165, baselinePasses: 154, candidatePasses: 158, criticalRegressions: 0 },
+      economics: { baselineAvgCost: 1, candidateAvgCost: 1.34, baselineP95: 10, candidateP95: 11.2 },
+    },
+  },
+  {
+    id: "hidden-harm",
+    name: "总体胜掩盖漂移退化",
+    description: "首次分类样本大胜，使总体看起来更好；但 Capability Drift 层显著变差。",
+    preset: {
+      evidence: { initial: { wins: 90, losses: 30, ties: 10 }, drift: { wins: 10, losses: 35, ties: 5 } },
+      objective: { total: 180, baselinePasses: 169, candidatePasses: 169, criticalRegressions: 0 },
+      economics: { baselineAvgCost: 1, candidateAvgCost: 1.08, baselineP95: 10, candidateP95: 10.5 },
+    },
+  },
+  {
+    id: "ties",
+    name: "平局过多",
+    description: "大量评审给出平局，决定性样本不足；即使观察胜率偏高也不能宣布胜出。",
+    preset: {
+      evidence: { initial: { wins: 10, losses: 5, ties: 35 }, drift: { wins: 5, losses: 3, ties: 22 } },
+      objective: { total: 80, baselinePasses: 74, candidatePasses: 75, criticalRegressions: 0 },
+      economics: { baselineAvgCost: 1, candidateAvgCost: 1.05, baselineP95: 10, candidateP95: 10.4 },
+    },
+  },
+  {
+    id: "objective",
+    name: "客观检查回退",
+    description: "盲评喜欢候选输出，但测试或引用正确性出现关键失败，必须否决。",
+    preset: {
+      evidence: { initial: { wins: 60, losses: 20, ties: 15 }, drift: { wins: 36, losses: 14, ties: 10 } },
+      objective: { total: 155, baselinePasses: 148, candidatePasses: 140, criticalRegressions: 1 },
+      economics: { baselineAvgCost: 1, candidateAvgCost: 1.12, baselineP95: 10, candidateP95: 11 },
+    },
+  },
+];
+
+let state = Protocol.initialState();
+let activeScenario = scenarios[0];
+
+const fmtPct = (n) => `${(n * 100).toFixed(1)}%`;
+const fmtRatio = (n) => `${n.toFixed(2)}×`;
+const toneFor = (status) => status === "adopt" ? "good" : status === "reject" ? "bad" : status === "hold" ? "warn" : "neutral";
+const labelFor = (status) => ({ adopt: "采用", reject: "否决", hold: "暂缓", inconclusive: "证据不足", incomplete: "未完成" }[status]);
+
+function gate(label, pass, waiting = false) {
+  const cls = waiting ? "wait" : pass ? "pass" : "fail";
+  const mark = waiting ? "…" : pass ? "✓" : "×";
+  return `<div class="gate ${cls}"><div class="mark">${mark}</div><div>${label}</div></div>`;
+}
+
+function render() {
+  const result = Protocol.evaluate(state);
+  const decision = document.querySelector("#decision");
+  decision.dataset.tone = toneFor(result.status);
+  decision.innerHTML = `
+    <div>
+      <div class="decision-title">${result.title}</div>
+      <p>${result.reason}</p>
+      <div class="gate-list">
+        ${gate("盲评与两个失效模式覆盖完整", result.gates.coveragePass, !state.loaded.quality)}
+        ${gate("总体候选胜率 95% 区间排除持平", result.gates.significantQualityWin, !state.loaded.quality)}
+        ${gate("客观检查非劣且无关键回退", result.gates.objectivePass, !state.loaded.objective)}
+        ${gate("平均总费用增幅 ≤ 20%", result.gates.costPass, !state.loaded.economics)}
+        ${gate("p95 延迟增幅 ≤ 20%", result.gates.latencyPass, !state.loaded.economics)}
+      </div>
+    </div>
+    <div class="decision-badge">${labelFor(result.status)}</div>`;
+
+  document.querySelector("#metrics").innerHTML = `
+    <div class="panel metric"><small>总体决定性胜率</small><strong>${result.modes.total.decisive ? fmtPct(result.modes.total.estimate) : "—"}</strong><small>95% CI ${fmtPct(result.modes.total.low)}–${fmtPct(result.modes.total.high)}；平局 ${result.modes.total.ties}</small></div>
+    <div class="panel metric"><small>候选 / 基线平均总费用</small><strong>${fmtRatio(result.economics.costRatio)}</strong><small>必须包含分类、输入输出、cache read/write 与预热</small></div>
+    <div class="panel metric"><small>候选 / 基线 p95 延迟</small><strong>${fmtRatio(result.economics.latencyRatio)}</strong><small>质量与成本、延迟分别过门，不直接相减</small></div>`;
+
+  const row = (name, m) => `<tr><td>${name}</td><td>${m.wins}</td><td>${m.losses}</td><td>${m.ties}</td><td>${m.decisive}</td><td>${m.decisive ? fmtPct(m.estimate) : "—"}</td><td>${fmtPct(m.low)}–${fmtPct(m.high)}</td></tr>`;
+  document.querySelector("#state-view").innerHTML = `
+    <table class="state-table">
+      <thead><tr><th>盲评层</th><th>候选胜</th><th>基线胜</th><th>平局</th><th>决定性</th><th>胜率</th><th>95% CI</th></tr></thead>
+      <tbody>${row("首次误判", result.modes.initial)}${row("能力漂移", result.modes.drift)}${row("总体", result.modes.total)}</tbody>
+    </table>
+    <div class="grid two section">
+      <div class="metric"><small>客观检查通过率</small><strong>${state.objective.total ? `${fmtPct(result.objective.candidateRate)} / ${fmtPct(result.objective.baselineRate)}` : "—"}</strong><small>候选 / 基线；允许最多低 2pp；关键回退 ${state.objective.criticalRegressions}</small></div>
+      <div class="metric"><small>已加载证据</small><strong>${Object.values(state.loaded).filter(Boolean).length}/3</strong><small>盲评 · 客观检查 · 经济数据</small></div>
+    </div>`;
+  document.querySelector("#last-action").textContent = `最近动作：${state.lastAction}`;
+  document.querySelector("#json-state").textContent = JSON.stringify({ state, result }, null, 2);
+  renderScenario();
+}
+
+function dispatch(action) {
+  state = Protocol.reducer(state, action);
+  render();
+}
+
+function renderTabs() {
+  document.querySelector("#scenario-tabs").innerHTML = scenarios.map(s =>
+    `<button class="tab ${s.id === activeScenario.id ? "active" : ""}" data-scenario="${s.id}">${s.name}</button>`
+  ).join("");
+}
+
+function renderScenario() {
+  const stages = [
+    ["quality", "加载盲评结果", "加入两个失效模式的配对盲评结果"],
+    ["objective", "加载客观检查", "加入测试、引用或约束满足结果"],
+    ["economics", "加载经济数据", "加入含缓存成本的总费用和 p95 延迟"],
+  ];
+  document.querySelector("#scenario-body").innerHTML = `
+    <h3>${activeScenario.name}</h3>
+    <p>${activeScenario.description}</p>
+    <div class="button-row"><button class="primary" data-start-scenario="${activeScenario.id}">从头开始这个场景</button></div>
+    <div class="walkthrough-steps">
+      ${stages.map(([stage, button, description], index) => {
+        const done = state.scenario === activeScenario.id && state.loaded[stage];
+        const previousDone = index === 0 || (state.scenario === activeScenario.id && state.loaded[stages[index - 1][0]]);
+        return `<div class="walkthrough-step"><div class="step-no ${done ? "done" : ""}">${done ? "✓" : index + 1}</div><div>${description}</div><button data-stage="${stage}" data-scenario-stage="${activeScenario.id}" ${!previousDone || done ? "disabled" : ""}>${button}</button></div>`;
+      }).join("")}
+    </div>`;
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.scenario) {
+    activeScenario = scenarios.find(s => s.id === button.dataset.scenario);
+    renderTabs(); renderScenario(); return;
+  }
+  if (button.dataset.startScenario) {
+    dispatch({ type: "START_SCENARIO", scenario: button.dataset.startScenario }); return;
+  }
+  if (button.dataset.scenarioStage) {
+    const scenario = scenarios.find(s => s.id === button.dataset.scenarioStage);
+    dispatch({ type: "LOAD_STAGE", scenario: scenario.id, stage: button.dataset.stage, preset: scenario.preset }); return;
+  }
+  if (button.dataset.action === "add-result") dispatch({ type: "ADD_RESULT", mode: button.dataset.mode, result: button.dataset.result, amount: 5 });
+  if (button.dataset.action === "objective") dispatch({ type: "ADJUST_OBJECTIVE", delta: Number(button.dataset.delta) });
+  if (button.dataset.action === "critical") dispatch({ type: "TOGGLE_CRITICAL" });
+  if (button.dataset.action === "cost") dispatch({ type: "ADJUST_ECONOMICS", field: "candidateAvgCost", delta: Number(button.dataset.delta) });
+  if (button.dataset.action === "latency") dispatch({ type: "ADJUST_ECONOMICS", field: "candidateP95", delta: Number(button.dataset.delta) });
+  if (button.dataset.action === "reset") dispatch({ type: "RESET" });
+});
+
+renderTabs();
+render();
+</script>
+</body>
+</html>
