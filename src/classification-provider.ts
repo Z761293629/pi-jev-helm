@@ -1,6 +1,19 @@
-export const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
+import { isObject, type JevClient } from "./jev-client.js";
+import {
+  CLASSIFICATION_MODEL,
+  OPENROUTER_DECISIONS_URL,
+  OpenRouterJevClient,
+  type FetchTransport,
+} from "./openrouter-jev-client.js";
+
+export { type JevClient } from "./jev-client.js";
+export {
+  CLASSIFICATION_MODEL,
+  OPENROUTER_DECISIONS_URL,
+  OpenRouterJevClient,
+} from "./openrouter-jev-client.js";
+
 export const CLASSIFICATION_TEMPLATE_VERSION = "classification-v1";
-export const CLASSIFICATION_MODEL = "typesafe/jev-1.13";
 export const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 2500;
 
 export const CLASSIFICATION_TEMPLATE_V1 = {
@@ -84,16 +97,15 @@ export interface ClassificationProvider {
   classify(message: string, options?: { signal?: AbortSignal }): Promise<ClassificationResult>;
 }
 
-type FetchTransport = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+export interface JevClassificationProviderOptions {
+  client: JevClient;
+  timeoutMs?: number;
+}
 
-interface ClassificationProviderOptions {
+interface OpenRouterJevClassificationProviderOptions {
   apiKey: string;
   timeoutMs?: number;
   fetch?: FetchTransport;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
@@ -166,53 +178,6 @@ function httpFailureKind(status: number): ClassificationFailureKind {
   return "unexpected_http";
 }
 
-function exposesSensitiveValue(candidate: string, sensitiveValues: readonly string[]): boolean {
-  return sensitiveValues.some((sensitiveValue) =>
-    sensitiveValue.length > 0 &&
-    (candidate.includes(sensitiveValue) ||
-      (candidate.length >= 8 && sensitiveValue.includes(candidate))),
-  );
-}
-
-function safeUpstreamCode(
-  value: unknown,
-  sensitiveValues: readonly string[],
-): string | number | undefined {
-  if (!isObject(value) || !isObject(value.error)) return undefined;
-  const code = value.error.code;
-  if (
-    typeof code === "string" &&
-    /^[A-Za-z0-9._:-]{1,128}$/.test(code) &&
-    !exposesSensitiveValue(code, sensitiveValues)
-  ) {
-    return code;
-  }
-  return typeof code === "number" &&
-    Number.isSafeInteger(code) &&
-    !exposesSensitiveValue(String(code), sensitiveValues)
-    ? code
-    : undefined;
-}
-
-function safeRetryAfterMs(headers: Headers): number | undefined {
-  const value = headers.get("retry-after");
-  if (value === null || !/^\d+$/.test(value.trim())) return undefined;
-  const milliseconds = Number(value.trim()) * 1000;
-  return Number.isSafeInteger(milliseconds) ? milliseconds : undefined;
-}
-
-function safeRequestId(
-  headers: Headers,
-  sensitiveValues: readonly string[],
-): string | undefined {
-  const value = headers.get("x-request-id");
-  return value &&
-    /^[A-Za-z0-9._:-]{1,256}$/.test(value) &&
-    !exposesSensitiveValue(value, sensitiveValues)
-    ? value
-    : undefined;
-}
-
 function isAbortFailure(error: unknown): boolean {
   return (
     (error instanceof DOMException && error.name === "AbortError") ||
@@ -242,24 +207,11 @@ function isNetworkFailure(error: unknown): boolean {
   );
 }
 
-function parseJson(text: string): unknown | undefined {
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return undefined;
-  }
-}
-
-function isClassificationModelIdentity(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  if (value === CLASSIFICATION_MODEL) return true;
-  const canonicalPrefix = `${CLASSIFICATION_MODEL}-`;
-  return value.startsWith(canonicalPrefix) &&
-    /^\d{8}$/.test(value.slice(canonicalPrefix.length));
-}
-
-function parseTaskClassificationResponse(value: unknown): TaskClassificationV1 | undefined {
-  if (!isObject(value) || !isClassificationModelIdentity(value.model)) {
+function parseTaskClassificationResponse(
+  value: unknown,
+  acceptsModelIdentity: (value: unknown) => boolean,
+): TaskClassificationV1 | undefined {
+  if (!isObject(value) || !acceptsModelIdentity(value.model)) {
     return undefined;
   }
   if (!isObject(value.usage)) return undefined;
@@ -299,20 +251,18 @@ function parseTaskClassificationResponse(value: unknown): TaskClassificationV1 |
   };
 }
 
-export class OpenRouterJevClassificationProvider implements ClassificationProvider {
-  private readonly apiKey: string;
+export class JevClassificationProvider implements ClassificationProvider {
+  private readonly client: JevClient;
   private readonly timeoutMs: number;
-  private readonly transport: FetchTransport;
 
-  constructor(options: ClassificationProviderOptions) {
-    this.apiKey = options.apiKey;
+  constructor(options: JevClassificationProviderOptions) {
+    this.client = options.client;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_CLASSIFICATION_TIMEOUT_MS;
-    this.transport = options.fetch ?? globalThis.fetch;
   }
 
   async classify(message: string, options: { signal?: AbortSignal } = {}): Promise<ClassificationResult> {
     if (
-      this.apiKey.trim().length === 0 ||
+      !this.client.isConfigured() ||
       !Number.isFinite(this.timeoutMs) ||
       this.timeoutMs <= 0 ||
       !hasValidClassificationTemplate()
@@ -345,48 +295,39 @@ export class OpenRouterJevClassificationProvider implements ClassificationProvid
     };
 
     const request = async (): Promise<ClassificationResult> => {
-      const requestBody = JSON.stringify({
-        model: CLASSIFICATION_MODEL,
-        state: message,
-        questions: CLASSIFICATION_TEMPLATE_V1,
-        provider: { zdr: true },
-      });
       ensureWithinDeadline();
-      const response = await this.transport(OPENROUTER_DECISIONS_URL, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: requestBody,
-        signal: requestController.signal,
-      });
-      const responseText = await response.text();
-      ensureWithinDeadline();
-      const body = parseJson(responseText);
+      const response = await this.client.evaluate(
+        { state: message, questions: CLASSIFICATION_TEMPLATE_V1 },
+        { signal: requestController.signal, ensureActive: ensureWithinDeadline },
+      );
       ensureWithinDeadline();
 
       if (!response.ok) {
         const kind = httpFailureKind(response.status);
-        const sensitiveValues = [this.apiKey, message];
-        const upstreamCode = safeUpstreamCode(body, sensitiveValues);
-        const retryAfterMs = safeRetryAfterMs(response.headers);
-        const requestId = safeRequestId(response.headers, sensitiveValues);
         return {
           ok: false,
           failure: {
             kind,
             summary: SAFE_FAILURE_SUMMARIES[kind],
             status: response.status,
-            ...(upstreamCode === undefined ? {} : { upstreamCode }),
-            ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-            ...(requestId === undefined ? {} : { requestId }),
+            ...(response.upstreamCode === undefined
+              ? {}
+              : { upstreamCode: response.upstreamCode }),
+            ...(response.retryAfterMs === undefined
+              ? {}
+              : { retryAfterMs: response.retryAfterMs }),
+            ...(response.requestId === undefined
+              ? {}
+              : { requestId: response.requestId }),
           },
         };
       }
 
-      if (body === undefined) return failure("protocol");
-      const classification = parseTaskClassificationResponse(body);
+      if (response.envelope === undefined) return failure("protocol");
+      const classification = parseTaskClassificationResponse(
+        response.envelope,
+        (value) => this.client.acceptsModelIdentity(value),
+      );
       ensureWithinDeadline();
       return classification ? { ok: true, classification } : failure("protocol");
     };
@@ -403,5 +344,23 @@ export class OpenRouterJevClassificationProvider implements ClassificationProvid
       clearTimeout(timeout);
       options.signal?.removeEventListener("abort", abort);
     }
+  }
+}
+
+/**
+ * Backward-compatible construction for callers of the pre-seam API. Protocol
+ * details live in OpenRouterJevClient; classification behavior lives in the
+ * single JevClassificationProvider implementation above. The extension itself
+ * wires that pair directly via createClassificationProvider.
+ */
+export class OpenRouterJevClassificationProvider extends JevClassificationProvider {
+  constructor(options: OpenRouterJevClassificationProviderOptions) {
+    super({
+      client: new OpenRouterJevClient({
+        apiKey: options.apiKey,
+        ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      }),
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    });
   }
 }
