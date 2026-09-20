@@ -25,14 +25,13 @@ your existing **Baseline Model**.
 
 ## Public Preview status
 
-`v0.1.0` is an externally installable but pre-stable release, and the
-changelog's prepared `0.2.0` entry adds the Classification Provider Selection
-behind migration notes that require no action. Within a minor line, patch
-releases preserve the user-facing configuration schema and the `/helm` command
-grammar; breaking changes require a new minor version plus migration notes in
-the [changelog](CHANGELOG.md). Published `v*` tags are immutable — an
-installed tag always resolves to the same source
-([tag policy](docs/tag-policy.md)).
+`v0.2.0` is an externally installable but pre-stable release; it adds the
+Classification Provider Selection behind migration notes that require no
+action. Within a minor line, patch releases preserve the user-facing
+configuration schema and the `/helm` command grammar; breaking changes require
+a new minor version plus migration notes in the [changelog](CHANGELOG.md).
+Published `v*` tags are immutable — an installed tag always resolves to the
+same source ([tag policy](docs/tag-policy.md)).
 
 The preview is feature-complete for its scope: the loadable extension, strict
 V1 configuration, automatic Jev Task Classification, the Classification
@@ -90,10 +89,10 @@ Two boundaries to know before installing:
 Pi packages run with full system access. Review the source (it is small) or
 pin an exact tag you have reviewed before installing.
 
-### Recommended: pinned `v0.1.0`, user-level
+### Recommended: pinned `v0.2.0`, user-level
 
 ```bash
-pi install git:github.com/Z761293629/pi-jev-helm@v0.1.0
+pi install git:github.com/Z761293629/pi-jev-helm@v0.2.0
 ```
 
 This is Pi's supported Git package syntax with an immutable version tag. The
@@ -109,7 +108,7 @@ configuration — that is the expected first-run state.
 To try Helm without installing it, use Pi's temporary extension flag:
 
 ```bash
-pi -e git:github.com/Z761293629/pi-jev-helm@v0.1.0
+pi -e git:github.com/Z761293629/pi-jev-helm@v0.2.0
 ```
 
 ### Following `main` (unstable tester path)
@@ -119,7 +118,7 @@ pi install git:github.com/Z761293629/pi-jev-helm@main
 ```
 
 `main` moves constantly, contains unreleased changes, and is **not** covered
-by the `0.1.x` compatibility contract. Use it only if you want to test
+by the `0.2.x` compatibility contract. Use it only if you want to test
 unreleased work and accept breakage. Do not use `@main` where you need a
 reproducible setup; that is what the pinned tag is for.
 
@@ -360,14 +359,14 @@ switch on purpose.
 
 ## Upgrade
 
-**Pinned tag** (`…@v0.1.0`): `pi update --extensions` and `pi update --all`
+**Pinned tag** (`…@v0.2.0`): `pi update --extensions` and `pi update --all`
 reconcile the clone to the same configured tag. Because published tags are
 immutable, an update can never silently move you to a different source or a
 newer version. Upgrading is a deliberate step — check
 [CHANGELOG.md](CHANGELOG.md) first, then point the install at the new tag:
 
 ```bash
-pi install git:github.com/Z761293629/pi-jev-helm@v0.1.1
+pi install git:github.com/Z761293629/pi-jev-helm@v0.2.1
 ```
 
 Patch releases within a minor line preserve the configuration schema and
