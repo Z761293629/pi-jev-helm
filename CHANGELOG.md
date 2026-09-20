@@ -11,19 +11,51 @@ deleted. A defective release is superseded by a new patch tag.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] — Public Preview (unreleased)
+
+Adds a second path to Jev: the Classification Provider Selection chooses
+between the OpenRouter Jev Client (the default, unchanged behavior) and the
+new TypeSafe Jev Client, with an explicit session-scoped override command and
+per-client attribution.
+
 ### Added
 
 - Classification Provider Selection: a new optional flat `classificationProvider`
   field in `pi-jev-helm.json` chooses the Jev Client through which Task
   Classification runs — `openrouter` (the default, today's behavior) or
-  `typesafe` (TypeSafe's official service, authenticated through Pi's own
-  credential system with `TYPESAFE_API_KEY` or `/login`). Unknown values are
-  rejected by configuration parsing with the field and its allowed values,
-  and a selection whose credential is missing leaves Automatic Routing
-  unavailable instead of substituting the other Jev Client; explicit Route
-  Overrides keep working. This schema addition is flagged to ship in
-  `0.2.0`; migration notes stating no action is required land with the
-  documentation ticket.
+  `typesafe`. Unknown values are rejected by configuration parsing with the
+  field and its allowed values, and a selection whose credential is missing
+  leaves Automatic Routing unavailable instead of substituting the other Jev
+  Client; explicit Route Overrides keep working
+  ([ADR 0002](docs/adr/0002-explicit-classification-provider-selection.md)).
+- TypeSafe Jev Client: reaches Jev through TypeSafe's official service
+  (`api.typesafe.ai/v1/systemone`) via the official `@typesafe-ai/sdk`, with
+  the classification model pinned to `jev-1.13.0` (aliases are never
+  requested or trusted) and the SDK confined to a single attempt inside the
+  shared 2500 ms classification deadline with abort pass-through
+  ([ADR 0003](docs/adr/0003-one-classification-provider-jev-client-seam.md)).
+  It authenticates through Pi's own credential system (`/login` or
+  `TYPESAFE_API_KEY`); the registered `typesafe` provider entry is auth-only
+  and never appears as a chat-model provider for Route Targets.
+- Session Classification Provider Override: `/helm client
+  openrouter|typesafe|clear` supersedes the configured selection for the
+  current session without writing configuration. It resets on every session
+  start (`/reload`, new, resume, fork, exit), rejects a selection whose
+  credential cannot be resolved, and `clear` is always allowed (warning when
+  the configured selection lacks a credential). The interactive TUI footer
+  prefixes every healthy-configuration state with the effective Jev Client's
+  human label (`OpenRouter · auto`, `TypeSafe · classifying`,
+  `TypeSafe · fail-open (provider-unavailable)`, …); `config error` stays
+  unprefixed and machine-readable modes stay silent.
+- Routing Explanations record the Jev Client that served each automatic
+  attempt (or whose absence caused a fail-open), shown by `/helm why`.
+- The real Jev compatibility gate certifies each Jev Client as its own leg:
+  the same `classification-v1` corpus, three independent executions per
+  message, and the per-message two-of-three rule per leg, each leg running
+  only when its own credential (`OPENROUTER_API_KEY` / `TYPESAFE_API_KEY`)
+  is present and reported as explicitly skipped otherwise.
 
 ### Changed
 
@@ -35,10 +67,12 @@ deleted. A defective release is superseded by a new patch tag.
 
 ### Upgrade and migration notes
 
-- No configuration or workflow changes are required. Automatic Routing
-  continues to classify through the OpenRouter Jev Client by default; the
-  opt-in `classificationProvider` selection above ships in `0.2.0` with its
-  own notes. No Pi `0.86.0` runtime API migration was needed.
+- No action is required. `classificationProvider` is optional and defaults to
+  `openrouter`, so existing configurations keep working verbatim and
+  Automatic Routing behavior is unchanged unless you opt in. To opt in, set
+  `"classificationProvider": "typesafe"` and authenticate the `typesafe`
+  provider through Pi (`/login` or the `TYPESAFE_API_KEY` environment
+  variable). No Pi `0.86.0` runtime API migration was needed.
 
 ## [0.1.0] — Public Preview (2026-09-19)
 
@@ -104,5 +138,6 @@ best-effort, and the next minor version may change the contract.
   patch tag, never by moving an existing one; see the
   [tag policy](docs/tag-policy.md).
 
-[Unreleased]: https://github.com/Z761293629/pi-jev-helm/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Z761293629/pi-jev-helm/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Z761293629/pi-jev-helm/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Z761293629/pi-jev-helm/releases/tag/v0.1.0

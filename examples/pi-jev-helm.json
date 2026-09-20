@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "automaticRouting": true,
+  "classificationProvider": "openrouter",
   "confidenceThreshold": 0.75,
   "routes": {
     "fast": {

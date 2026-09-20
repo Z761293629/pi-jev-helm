@@ -63,8 +63,9 @@ or comment — public or private:
   still resemble real ones.
 - **Raw sensitive prompts** — real user messages sent through the extension.
   Reproduce defects with synthetic placeholder text instead.
-- **Unsanitized upstream payloads** — OpenRouter request or response bodies,
-  headers, provider error text, or captured network traffic.
+- **Unsanitized upstream payloads** — OpenRouter or TypeSafe request or
+  response bodies, headers, provider error text, or captured network
+  traffic.
 - Personal data about yourself or others that the report does not need.
 
 Sanitization rule: replace each redacted item with an obvious placeholder such

@@ -48,13 +48,22 @@ describe("checked-in starter configuration example", () => {
       config: {
         schemaVersion: 1,
         automaticRouting: true,
-        // The example omits the field; the default Selection is the OpenRouter
+        // The example pins the default Selection explicitly: the OpenRouter
         // Jev Client, identical to pre-0.2.0 behavior.
         classificationProvider: "openrouter",
         confidenceThreshold: 0.75,
         routes: EXAMPLE_ROUTES,
       },
     });
+  });
+
+  it("demonstrates the default Classification Provider Selection in the source", async () => {
+    const source = await readFile(EXAMPLE_PATH, "utf8");
+    const parsed = JSON.parse(source) as { classificationProvider?: unknown };
+
+    // The starter template shows the field with its default value so the
+    // Classification Provider Selection is discoverable without the docs.
+    expect(parsed.classificationProvider).toBe("openrouter");
   });
 
   it("uses only credential-free provider and model placeholders", async () => {
