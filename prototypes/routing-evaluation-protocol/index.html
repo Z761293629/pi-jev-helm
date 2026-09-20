@@ -144,8 +144,8 @@
   <div class="eyebrow">Throwaway logic prototype</div>
   <h1>路由评测协议模拟器</h1>
   <p class="intro">
-    这个原型回答一个问题：当候选路由可能修正首次误判、处理 Capability Drift，
-    同时又可能因模型切换损失 Prompt Cache 时，什么证据足以判定它优于当前 Helm？
+    这个原型回答一个问题：候选路由能否在质量零退化的硬底线下，
+    把包含 Prompt Cache、分类和模型调用的平均总费用至少降低 20%？
   </p>
   <div class="warning">原型，不是生产实现。双击本文件即可运行；所有状态只存在内存中。</div>
 
@@ -162,12 +162,12 @@
     <div class="panel">
       <h2>协议草案</h2>
       <div class="protocol">
-        <div class="protocol-item"><div><strong>配对执行</strong><br>同一冻结任务轨迹分别运行当前 Helm 与候选方案；随机标为 A/B。</div></div>
-        <div class="protocol-item"><div><strong>整任务盲评</strong><br>盲评单位是完整任务结果，不是某个 Turn。平局保留报告，但从候选胜率的 95% Wilson 区间中排除。</div></div>
-        <div class="protocol-item"><div><strong>客观检查</strong><br>测试、引用、约束满足等必须非劣；新增关键失败直接否决。</div></div>
-        <div class="protocol-item"><div><strong>分层检查</strong><br>首次分类错误与 Capability Drift 分开报告；任何一层出现显著伤害都不能被总体平均掩盖。</div></div>
-        <div class="protocol-item"><div><strong>经济护栏</strong><br>平均总费用与 p95 延迟分别不得超过基线 20%；费用包含 cache read/write、预热和分类。</div></div>
-        <div class="protocol-item"><div><strong>最终判定</strong><br>质量显著提升且所有护栏通过才采用；质量与美元不直接相减。</div></div>
+        <div class="protocol-item"><div><strong>双成本基线</strong><br>候选同时与当前 Helm、始终强模型比较；每条任务轨迹固定后配对运行。</div></div>
+        <div class="protocol-item"><div><strong>质量硬底线</strong><br>完整任务 A/B 盲评；候选胜率的 95% Wilson 区间下界必须达到 50%，不能只靠“没有发现退化”。</div></div>
+        <div class="protocol-item"><div><strong>客观零退化</strong><br>测试、引用、约束满足等通过率不得低于当前 Helm；新增关键失败直接否决。</div></div>
+        <div class="protocol-item"><div><strong>分层检查</strong><br>首次分类错误与 Capability Drift 分开报告；任何一层退化都不能被总体平均掩盖。</div></div>
+        <div class="protocol-item"><div><strong>节省目标</strong><br>候选平均总费用必须同时不高于当前 Helm 和始终强模型的 80%；包含 cache read/write、预热和分类。</div></div>
+        <div class="protocol-item"><div><strong>最终判定</strong><br>质量硬底线、客观检查、20% 节省和 p95 延迟护栏全部通过才采用。</div></div>
       </div>
     </div>
   </section>
@@ -242,12 +242,13 @@ const Protocol = (() => {
   const initialState = () => ({
     evidence: { initial: emptyEvidence(), drift: emptyEvidence() },
     objective: { total: 0, baselinePasses: 0, candidatePasses: 0, criticalRegressions: 0 },
-    economics: { baselineAvgCost: 1, candidateAvgCost: 1, baselineP95: 10, candidateP95: 10 },
+    economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 1, currentHelmP95: 10, candidateP95: 10 },
     thresholds: {
       confidence: 0.95,
       minDecisivePerMode: 20,
-      objectiveTolerance: 0.02,
-      maxCostRatio: 1.20,
+      objectiveTolerance: 0,
+      maxCandidateToCurrentCostRatio: 0.80,
+      maxCandidateToStrongCostRatio: 0.80,
       maxLatencyRatio: 1.20,
     },
     loaded: { quality: false, objective: false, economics: false },
@@ -279,7 +280,8 @@ const Protocol = (() => {
     });
     const modes = [initial, drift];
     const coveragePass = modes.every((m) => m.decisive >= state.thresholds.minDecisivePerMode);
-    const significantQualityWin = total.low > 0.5;
+    const strictQualityFloorPass = total.low >= 0.5;
+    const modeObservedNoLoss = modes.every((m) => m.decisive > 0 && m.estimate >= 0.5);
     const significantModeHarm = modes.some((m) => m.decisive > 0 && m.high < 0.5);
 
     const objectiveBaselineRate = state.objective.total ? state.objective.baselinePasses / state.objective.total : 0;
@@ -288,9 +290,11 @@ const Protocol = (() => {
       state.objective.criticalRegressions === 0 &&
       objectiveCandidateRate + state.thresholds.objectiveTolerance >= objectiveBaselineRate;
 
-    const costRatio = state.economics.candidateAvgCost / state.economics.baselineAvgCost;
-    const latencyRatio = state.economics.candidateP95 / state.economics.baselineP95;
-    const costPass = costRatio <= state.thresholds.maxCostRatio + 1e-9;
+    const candidateToCurrentCostRatio = state.economics.candidateAvgCost / state.economics.currentHelmAvgCost;
+    const candidateToStrongCostRatio = state.economics.candidateAvgCost / state.economics.strongModelAvgCost;
+    const latencyRatio = state.economics.candidateP95 / state.economics.currentHelmP95;
+    const currentSavingsPass = candidateToCurrentCostRatio <= state.thresholds.maxCandidateToCurrentCostRatio + 1e-9;
+    const strongSavingsPass = candidateToStrongCostRatio <= state.thresholds.maxCandidateToStrongCostRatio + 1e-9;
     const latencyPass = latencyRatio <= state.thresholds.maxLatencyRatio + 1e-9;
     const complete = Object.values(state.loaded).every(Boolean);
 
@@ -298,37 +302,42 @@ const Protocol = (() => {
     let title = "等待完整证据";
     let reason = "依次加入盲评、客观检查和经济数据。";
     if (complete) {
-      if (state.objective.criticalRegressions > 0 || significantModeHarm || !objectivePass) {
+      if (state.objective.criticalRegressions > 0 || significantModeHarm || !modeObservedNoLoss || !objectivePass) {
         status = "reject";
         title = "否决候选方案";
         reason = state.objective.criticalRegressions > 0
           ? "出现新增关键客观失败。"
-          : significantModeHarm
-            ? "某个失效模式出现显著伤害，不能被总体均值掩盖。"
-            : "客观检查低于允许的非劣界限。";
-      } else if (!coveragePass || !significantQualityWin) {
+          : significantModeHarm || !modeObservedNoLoss
+            ? "首次误判或 Capability Drift 分层出现质量下降。"
+            : "客观检查通过率低于当前 Helm。";
+      } else if (!coveragePass || !strictQualityFloorPass) {
         status = "inconclusive";
-        title = "证据不足";
+        title = "质量零退化证据不足";
         reason = !coveragePass
           ? "首次误判或 Capability Drift 的决定性样本不足。"
-          : "候选胜率的 95% 区间仍未排除持平。";
-      } else if (!costPass || !latencyPass) {
+          : "候选胜率的 95% 区间下界仍低于 50%；有限样本无法证明质量完全不降。";
+      } else if (!currentSavingsPass || !strongSavingsPass || !latencyPass) {
         status = "hold";
-        title = "质量胜出，但经济护栏失败";
-        reason = `${!costPass ? "平均总费用" : ""}${!costPass && !latencyPass ? "与" : ""}${!latencyPass ? "p95 延迟" : ""}超过 20% 护栏；本协议不把质量分数直接换算成美元。`;
+        title = "质量达标，但节省目标失败";
+        const failures = [
+          !currentSavingsPass ? "相对当前 Helm 未节省 20%" : "",
+          !strongSavingsPass ? "相对始终强模型未节省 20%" : "",
+          !latencyPass ? "p95 延迟超过 20% 护栏" : "",
+        ].filter(Boolean);
+        reason = failures.join("；") + "。";
       } else {
         status = "adopt";
         title = "采用候选方案";
-        reason = "质量显著提升，两个失效模式无显著伤害，客观检查与经济护栏全部通过。";
+        reason = "质量零退化证据通过，两个失效模式无下降，且相对双基线均至少节省 20%。";
       }
     }
 
     return {
       status, title, reason, complete,
       modes: { initial, drift, total },
-      gates: { coveragePass, significantQualityWin, significantModeHarm, objectivePass, costPass, latencyPass },
+      gates: { coveragePass, strictQualityFloorPass, modeObservedNoLoss, significantModeHarm, objectivePass, currentSavingsPass, strongSavingsPass, latencyPass },
       objective: { baselineRate: objectiveBaselineRate, candidateRate: objectiveCandidateRate },
-      economics: { costRatio, latencyRatio },
+      economics: { candidateToCurrentCostRatio, candidateToStrongCostRatio, latencyRatio },
     };
   }
 
@@ -361,12 +370,12 @@ const Protocol = (() => {
     }
     if (action.type === "ADJUST_ECONOMICS") {
       if (action.field === "candidateAvgCost") {
-        next.economics.candidateAvgCost = Math.max(.1, next.economics.candidateAvgCost + next.economics.baselineAvgCost * action.delta);
+        next.economics.candidateAvgCost = Math.max(.1, next.economics.candidateAvgCost + next.economics.currentHelmAvgCost * action.delta);
       } else {
-        next.economics.candidateP95 = Math.max(.1, next.economics.candidateP95 + next.economics.baselineP95 * action.delta);
+        next.economics.candidateP95 = Math.max(.1, next.economics.candidateP95 + next.economics.currentHelmP95 * action.delta);
       }
       next.loaded.economics = true;
-      next.lastAction = `${action.field === "candidateAvgCost" ? "候选平均总费用" : "候选 p95 延迟"} ${action.delta > 0 ? "+" : ""}${Math.round(action.delta * 100)}% 基线`;
+      next.lastAction = `${action.field === "candidateAvgCost" ? "候选平均总费用" : "候选 p95 延迟"} ${action.delta > 0 ? "+" : ""}${Math.round(action.delta * 100)}% 当前 Helm`;
       return next;
     }
     if (action.type === "LOAD_STAGE") {
@@ -407,52 +416,52 @@ const Protocol = (() => {
 const scenarios = [
   {
     id: "win",
-    name: "真实胜出",
-    description: "候选同时修正首次误判和 Capability Drift，客观检查非劣，缓存成本计入后仍在护栏内。",
+    name: "节省达标且质量不降",
+    description: "候选通过严格质量底线，并在计入缓存后同时比当前 Helm 和始终强模型便宜至少 20%。",
     preset: {
       evidence: { initial: { wins: 55, losses: 25, ties: 20 }, drift: { wins: 38, losses: 17, ties: 10 } },
-      objective: { total: 165, baselinePasses: 154, candidatePasses: 157, criticalRegressions: 0 },
-      economics: { baselineAvgCost: 1, candidateAvgCost: 1.14, baselineP95: 10, candidateP95: 11.1 },
+      objective: { total: 165, baselinePasses: 154, candidatePasses: 154, criticalRegressions: 0 },
+      economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.75, currentHelmP95: 10, candidateP95: 11 },
     },
   },
   {
     id: "cache",
-    name: "缓存代价过高",
-    description: "质量明显更好，但中途换模型导致 cache write 和未命中，使平均总费用超过 20%。",
+    name: "缓存吃掉节省",
+    description: "质量没有下降，但中途换模型产生 cache write 和未命中，只比当前 Helm 节省 8%。",
     preset: {
-      evidence: { initial: { wins: 58, losses: 22, ties: 20 }, drift: { wins: 40, losses: 15, ties: 10 } },
-      objective: { total: 165, baselinePasses: 154, candidatePasses: 158, criticalRegressions: 0 },
-      economics: { baselineAvgCost: 1, candidateAvgCost: 1.34, baselineP95: 10, candidateP95: 11.2 },
+      evidence: { initial: { wins: 56, losses: 24, ties: 20 }, drift: { wins: 38, losses: 17, ties: 10 } },
+      objective: { total: 165, baselinePasses: 154, candidatePasses: 154, criticalRegressions: 0 },
+      economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.92, currentHelmP95: 10, candidateP95: 11 },
     },
   },
   {
     id: "hidden-harm",
-    name: "总体胜掩盖漂移退化",
-    description: "首次分类样本大胜，使总体看起来更好；但 Capability Drift 层显著变差。",
+    name: "总体持平掩盖漂移退化",
+    description: "总体质量看起来尚可，但 Capability Drift 层的候选结果明显更差。",
     preset: {
       evidence: { initial: { wins: 90, losses: 30, ties: 10 }, drift: { wins: 10, losses: 35, ties: 5 } },
       objective: { total: 180, baselinePasses: 169, candidatePasses: 169, criticalRegressions: 0 },
-      economics: { baselineAvgCost: 1, candidateAvgCost: 1.08, baselineP95: 10, candidateP95: 10.5 },
+      economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.7, currentHelmP95: 10, candidateP95: 10.5 },
     },
   },
   {
     id: "ties",
-    name: "平局过多",
-    description: "大量评审给出平局，决定性样本不足；即使观察胜率偏高也不能宣布胜出。",
+    name: "质量证据不足",
+    description: "大量平局导致区间过宽；虽然已经省钱，但还不能证明质量完全不降。",
     preset: {
       evidence: { initial: { wins: 10, losses: 5, ties: 35 }, drift: { wins: 5, losses: 3, ties: 22 } },
-      objective: { total: 80, baselinePasses: 74, candidatePasses: 75, criticalRegressions: 0 },
-      economics: { baselineAvgCost: 1, candidateAvgCost: 1.05, baselineP95: 10, candidateP95: 10.4 },
+      objective: { total: 80, baselinePasses: 74, candidatePasses: 74, criticalRegressions: 0 },
+      economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.7, currentHelmP95: 10, candidateP95: 10.4 },
     },
   },
   {
     id: "objective",
     name: "客观检查回退",
-    description: "盲评喜欢候选输出，但测试或引用正确性出现关键失败，必须否决。",
+    description: "盲评与节省目标都通过，但测试或引用正确性出现关键失败，必须否决。",
     preset: {
       evidence: { initial: { wins: 60, losses: 20, ties: 15 }, drift: { wins: 36, losses: 14, ties: 10 } },
       objective: { total: 155, baselinePasses: 148, candidatePasses: 140, criticalRegressions: 1 },
-      economics: { baselineAvgCost: 1, candidateAvgCost: 1.12, baselineP95: 10, candidateP95: 11 },
+      economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.72, currentHelmP95: 10, candidateP95: 11 },
     },
   },
 ];
@@ -481,9 +490,10 @@ function render() {
       <p>${result.reason}</p>
       <div class="gate-list">
         ${gate("盲评与两个失效模式覆盖完整", result.gates.coveragePass, !state.loaded.quality)}
-        ${gate("总体候选胜率 95% 区间排除持平", result.gates.significantQualityWin, !state.loaded.quality)}
-        ${gate("客观检查非劣且无关键回退", result.gates.objectivePass, !state.loaded.objective)}
-        ${gate("平均总费用增幅 ≤ 20%", result.gates.costPass, !state.loaded.economics)}
+        ${gate("质量硬底线：总体 95% 区间下界 ≥ 50%", result.gates.strictQualityFloorPass, !state.loaded.quality)}
+        ${gate("客观检查不低于当前 Helm 且无关键回退", result.gates.objectivePass, !state.loaded.objective)}
+        ${gate("相对当前 Helm 平均总费用至少节省 20%", result.gates.currentSavingsPass, !state.loaded.economics)}
+        ${gate("相对始终强模型平均总费用至少节省 20%", result.gates.strongSavingsPass, !state.loaded.economics)}
         ${gate("p95 延迟增幅 ≤ 20%", result.gates.latencyPass, !state.loaded.economics)}
       </div>
     </div>
@@ -491,8 +501,9 @@ function render() {
 
   document.querySelector("#metrics").innerHTML = `
     <div class="panel metric"><small>总体决定性胜率</small><strong>${result.modes.total.decisive ? fmtPct(result.modes.total.estimate) : "—"}</strong><small>95% CI ${fmtPct(result.modes.total.low)}–${fmtPct(result.modes.total.high)}；平局 ${result.modes.total.ties}</small></div>
-    <div class="panel metric"><small>候选 / 基线平均总费用</small><strong>${fmtRatio(result.economics.costRatio)}</strong><small>必须包含分类、输入输出、cache read/write 与预热</small></div>
-    <div class="panel metric"><small>候选 / 基线 p95 延迟</small><strong>${fmtRatio(result.economics.latencyRatio)}</strong><small>质量与成本、延迟分别过门，不直接相减</small></div>`;
+    <div class="panel metric"><small>候选 / 当前 Helm 费用</small><strong>${fmtRatio(result.economics.candidateToCurrentCostRatio)}</strong><small>目标 ≤ 0.80×；含分类、cache 和预热</small></div>
+    <div class="panel metric"><small>候选 / 始终强模型费用</small><strong>${fmtRatio(result.economics.candidateToStrongCostRatio)}</strong><small>目标 ≤ 0.80×；展示产品总体节省</small></div>
+    <div class="panel metric"><small>候选 / 当前 Helm p95</small><strong>${fmtRatio(result.economics.latencyRatio)}</strong><small>延迟最多增加 20%</small></div>`;
 
   const row = (name, m) => `<tr><td>${name}</td><td>${m.wins}</td><td>${m.losses}</td><td>${m.ties}</td><td>${m.decisive}</td><td>${m.decisive ? fmtPct(m.estimate) : "—"}</td><td>${fmtPct(m.low)}–${fmtPct(m.high)}</td></tr>`;
   document.querySelector("#state-view").innerHTML = `
@@ -501,7 +512,7 @@ function render() {
       <tbody>${row("首次误判", result.modes.initial)}${row("能力漂移", result.modes.drift)}${row("总体", result.modes.total)}</tbody>
     </table>
     <div class="grid two section">
-      <div class="metric"><small>客观检查通过率</small><strong>${state.objective.total ? `${fmtPct(result.objective.candidateRate)} / ${fmtPct(result.objective.baselineRate)}` : "—"}</strong><small>候选 / 基线；允许最多低 2pp；关键回退 ${state.objective.criticalRegressions}</small></div>
+      <div class="metric"><small>客观检查通过率</small><strong>${state.objective.total ? `${fmtPct(result.objective.candidateRate)} / ${fmtPct(result.objective.baselineRate)}` : "—"}</strong><small>候选 / 当前 Helm；不允许下降；关键回退 ${state.objective.criticalRegressions}</small></div>
       <div class="metric"><small>已加载证据</small><strong>${Object.values(state.loaded).filter(Boolean).length}/3</strong><small>盲评 · 客观检查 · 经济数据</small></div>
     </div>`;
   document.querySelector("#last-action").textContent = `最近动作：${state.lastAction}`;

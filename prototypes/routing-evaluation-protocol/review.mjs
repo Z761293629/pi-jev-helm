@@ -9,7 +9,7 @@
  *
  * Usage:
  *   node prototypes/routing-evaluation-protocol/review.mjs
- *   node .../review.mjs --max-cost 1.35 --min-decisive 40
+ *   node .../review.mjs --max-current-cost 0.75 --min-decisive 40
  *   node .../review.mjs --sweep-cost
  */
 import { readFile } from "node:fs/promises";
@@ -39,18 +39,18 @@ function flag(name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 const overrides = {
-  maxCostRatio: flag("max-cost", undefined),
+  maxCandidateToCurrentCostRatio: flag("max-current-cost", undefined),
+  maxCandidateToStrongCostRatio: flag("max-strong-cost", undefined),
   maxLatencyRatio: flag("max-latency", undefined),
   minDecisivePerMode: flag("min-decisive", undefined),
-  objectiveTolerance: flag("objective-tolerance", undefined),
 };
 
 function buildState(preset) {
   const base = Protocol.initialState();
-  if (overrides.maxCostRatio !== undefined) base.thresholds.maxCostRatio = overrides.maxCostRatio;
+  if (overrides.maxCandidateToCurrentCostRatio !== undefined) base.thresholds.maxCandidateToCurrentCostRatio = overrides.maxCandidateToCurrentCostRatio;
+  if (overrides.maxCandidateToStrongCostRatio !== undefined) base.thresholds.maxCandidateToStrongCostRatio = overrides.maxCandidateToStrongCostRatio;
   if (overrides.maxLatencyRatio !== undefined) base.thresholds.maxLatencyRatio = overrides.maxLatencyRatio;
   if (overrides.minDecisivePerMode !== undefined) base.thresholds.minDecisivePerMode = overrides.minDecisivePerMode;
-  if (overrides.objectiveTolerance !== undefined) base.thresholds.objectiveTolerance = overrides.objectiveTolerance;
   base.evidence = structuredClone(preset.evidence);
   base.objective = structuredClone(preset.objective);
   base.economics = structuredClone(preset.economics);
@@ -62,23 +62,24 @@ const pad = (value, width) => String(value).padEnd(width);
 const pct = (n) => `${(n * 100).toFixed(1)}%`;
 
 console.log("路由评测协议 · 终端评审");
-console.log("质量与成本是两个独立门槛；平局保留报告，不进入胜率分母。\n");
+console.log("目标：质量零退化，同时相对当前 Helm 和始终强模型至少节省 20%。\n");
 
 console.log(
-  `${pad("场景", 20)}${pad("首次误判", 16)}${pad("能力漂移", 16)}${pad("总体胜率 95%CI", 22)}${pad("费用", 8)}${pad("p95", 8)}判定`,
+  `${pad("场景", 22)}${pad("首次误判", 16)}${pad("能力漂移", 16)}${pad("总体胜率 95%CI", 22)}${pad("/Helm", 8)}${pad("/强模", 8)}${pad("p95", 8)}判定`,
 );
-console.log("-".repeat(104));
+console.log("-".repeat(116));
 
 for (const scenario of scenarios) {
   const state = buildState(scenario.preset);
   const result = Protocol.evaluate(state);
   const mode = (m) => `${m.wins}/${m.losses}/${m.ties}`;
   console.log(
-    pad(scenario.name, 20) +
+    pad(scenario.name, 22) +
       pad(mode(result.modes.initial), 16) +
       pad(mode(result.modes.drift), 16) +
       pad(`${pct(result.modes.total.estimate)} ${pct(result.modes.total.low)}–${pct(result.modes.total.high)}`, 22) +
-      pad(`${result.economics.costRatio.toFixed(2)}×`, 8) +
+      pad(`${result.economics.candidateToCurrentCostRatio.toFixed(2)}×`, 8) +
+      pad(`${result.economics.candidateToStrongCostRatio.toFixed(2)}×`, 8) +
       pad(`${result.economics.latencyRatio.toFixed(2)}×`, 8) +
       result.title,
   );
@@ -87,8 +88,9 @@ for (const scenario of scenarios) {
 console.log("\n图例：首次误判 / 能力漂移 列的格式为 候选胜/基线胜/平局。");
 console.log(
   `当前阈值：每类至少 ${overrides.minDecisivePerMode ?? 20} 个决定性样本 · ` +
-    `客观容忍 ${((overrides.objectiveTolerance ?? 0.02) * 100).toFixed(0)}pp · ` +
-    `费用 ≤ ${(overrides.maxCostRatio ?? 1.2).toFixed(2)}× · ` +
+    `客观检查不下降 · ` +
+    `候选/Helm ≤ ${(overrides.maxCandidateToCurrentCostRatio ?? 0.8).toFixed(2)}× · ` +
+    `候选/强模 ≤ ${(overrides.maxCandidateToStrongCostRatio ?? 0.8).toFixed(2)}× · ` +
     `p95 延迟 ≤ ${(overrides.maxLatencyRatio ?? 1.2).toFixed(2)}×`,
 );
 
@@ -97,9 +99,9 @@ if (argv.includes("--sweep-cost")) {
   console.log(`\n费用护栏敏感性（场景：${scenario.name}，其余阈值不变）`);
   console.log(`${pad("费用比", 10)}判定`);
   console.log("-".repeat(44));
-  for (const ratio of [1.0, 1.1, 1.2, 1.25, 1.3, 1.4, 1.5]) {
+  for (const ratio of [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 1.0]) {
     const preset = structuredClone(scenario.preset);
-    preset.economics.candidateAvgCost = preset.economics.baselineAvgCost * ratio;
+    preset.economics.candidateAvgCost = preset.economics.currentHelmAvgCost * ratio;
     const state = buildState(preset);
     const result = Protocol.evaluate(state);
     console.log(pad(`${ratio.toFixed(2)}×`, 10) + result.title);
