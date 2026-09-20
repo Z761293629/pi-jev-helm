@@ -20,6 +20,22 @@ _Avoid_: Model selection, route decision
 An adapter that classifies the current user message and returns a Task Classification. It hides vendor-specific evaluation protocols and never chooses a Route or applies Routing Policy confidence thresholds.
 _Avoid_: Provider, router
 
+**Jev Client**:
+The vendor-specific client through which the Classification Provider reaches Jev. It carries the vendor protocol so the classification logic itself stays a single implementation.
+_Avoid_: Classifier, backend
+
+**OpenRouter Jev Client**:
+The Jev Client that reaches Jev through OpenRouter.
+_Avoid_: Default client
+
+**TypeSafe Jev Client**:
+The Jev Client that reaches Jev through TypeSafe's own service rather than through an intermediary.
+_Avoid_: Official client, typesafe provider
+
+**Classification Provider Selection**:
+The user-configured choice of the Jev Client through which Task Classification is performed. A selection that cannot be honored leaves Automatic Routing unavailable; it never silently substitutes another Jev Client.
+_Avoid_: Auto provider detection, provider fallback
+
 **Capability Signal**:
 An independent Boolean judgment in a Task Classification, paired with confidence that the judgment is correct. V1 uses `codeWork`, `deepReasoning`, and `externalResearch`.
 _Avoid_: Task type, route label
