@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   completeRoutes,
   createDecisionsResponse,
+  createTypeSafeDecisionsResponse,
   deferred,
   restoreAgentDirectory,
 } from "./fixtures.js";
@@ -60,6 +61,7 @@ describe("Pi Jev Helm routing explanations", () => {
         kind: "routing-attempt",
         runId: expect.any(String),
         source: "automatic",
+        jevClient: "openrouter",
         outcome: "routed",
         route: "coding",
         signals: [
@@ -126,6 +128,7 @@ describe("Pi Jev Helm routing explanations", () => {
         kind: "routing-attempt",
         runId: expect.any(String),
         source: "automatic",
+        jevClient: "openrouter",
         outcome: "fail-open",
         signals: [
           { name: "codeWork", value: true, confidence: 0.9 },
@@ -177,6 +180,7 @@ describe("Pi Jev Helm routing explanations", () => {
         kind: "routing-attempt",
         runId: expect.any(String),
         source: "automatic",
+        jevClient: "openrouter",
         outcome: "fail-open",
         baseline: {
           provider: "baseline-provider",
@@ -595,6 +599,7 @@ describe("Pi Jev Helm routing explanations", () => {
         kind: "routing-attempt",
         runId: expect.any(String),
         source: "automatic",
+        jevClient: "openrouter",
         outcome: "fail-open",
         baseline: {
           provider: "baseline-provider",
@@ -685,5 +690,150 @@ describe("Pi Jev Helm routing explanations", () => {
     await harness.emit("before_agent_start", { prompt: "ambiguous follow-up" });
     await harness.emit("agent_settled");
     expect(selectBranchRecentRoute(harness.context.sessionManager.getBranch())).toBe("coding");
+  });
+});
+
+describe("Jev Client identity in Routing Explanations", () => {
+  beforeEach(async () => {
+    agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-jev-client-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+  });
+
+  afterEach(() => {
+    restoreAgentDirectory(originalAgentDir);
+    vi.unstubAllGlobals();
+  });
+
+  it("records the selected TypeSafe Jev Client for a routed classification and keeps credentials out of the serialization", async () => {
+    await writeHelmConfig(agentDir, {
+      automaticRouting: true,
+      classificationProvider: "typesafe",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        createTypeSafeDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+      ),
+    );
+    const harness = createHarness("tui", {
+      apiKeysByProvider: { typesafe: "test-typesafe-key" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "a private refactor request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "a private refactor request" });
+
+    const attempts = explanationEntries(harness.sessionEntries);
+    expect(attempts).toEqual([
+      expect.objectContaining({
+        kind: "routing-attempt",
+        source: "automatic",
+        outcome: "routed",
+        route: "coding",
+        jevClient: "typesafe",
+      }),
+    ]);
+
+    const serialized = JSON.stringify(harness.sessionEntries.map((entry) => entry.data));
+    expect(serialized).not.toContain("test-typesafe-key");
+    expect(serialized).not.toContain("test-openrouter-key");
+    expect(serialized).not.toContain("a private refactor request");
+  });
+
+  it("records the TypeSafe Jev Client whose failure caused a fail-open", async () => {
+    await writeHelmConfig(agentDir, {
+      automaticRouting: true,
+      classificationProvider: "typesafe",
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("", { status: 500 })),
+    );
+    const harness = createHarness("tui", {
+      apiKeysByProvider: { typesafe: "test-typesafe-key" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "a private research request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "a private research request" });
+    await harness.emit("agent_settled");
+
+    expect(explanationEntries(harness.sessionEntries)).toEqual([
+      expect.objectContaining({
+        kind: "routing-attempt",
+        source: "automatic",
+        outcome: "fail-open",
+        jevClient: "typesafe",
+        failOpen: {
+          reason: "classification-failed",
+          classification: { kind: "upstream", status: 500 },
+          baselineRetained: true,
+        },
+      }),
+    ]);
+
+    await harness.command("why");
+    expect(harness.notices.at(-1)?.message).toContain("Jev Client: typesafe");
+    const serialized = JSON.stringify(harness.sessionEntries.map((entry) => entry.data));
+    expect(serialized).not.toContain("test-typesafe-key");
+  });
+
+  it("records the selected TypeSafe Jev Client when its missing credential fails the attempt open", async () => {
+    await writeHelmConfig(agentDir, {
+      automaticRouting: true,
+      classificationProvider: "typesafe",
+    });
+    vi.stubGlobal("fetch", vi.fn());
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "a private request", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "a private request" });
+
+    expect(explanationEntries(harness.sessionEntries)).toEqual([
+      expect.objectContaining({
+        kind: "routing-attempt",
+        source: "automatic",
+        outcome: "fail-open",
+        jevClient: "typesafe",
+        failOpen: { reason: "provider-unavailable", baselineRetained: true },
+      }),
+    ]);
+  });
+
+  it("records the default OpenRouter Jev Client when the selection field is absent", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 })),
+    );
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "refactor the parser module", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "refactor the parser module" });
+
+    expect(explanationEntries(harness.sessionEntries)).toEqual([
+      expect.objectContaining({
+        kind: "routing-attempt",
+        source: "automatic",
+        outcome: "routed",
+        jevClient: "openrouter",
+      }),
+    ]);
+
+    await harness.command("why");
+    expect(harness.notices.at(-1)?.message).toContain("Jev Client: openrouter");
+  });
+
+  it("leaves Route Override attempts without a Jev Client identity", async () => {
+    await writeHelmConfig(agentDir, { automaticRouting: false });
+    const harness = createHarness();
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("route coding");
+    await harness.emit("before_agent_start", { prompt: "override work" });
+    await harness.emit("agent_settled");
+
+    const attempts = explanationEntries(harness.sessionEntries).filter(
+      (entry) => (entry as { kind?: string }).kind === "routing-attempt",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).not.toHaveProperty("jevClient");
   });
 });

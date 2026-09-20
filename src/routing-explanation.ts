@@ -4,7 +4,7 @@ import type {
   CapabilitySignalName,
   ClassificationFailureKind,
 } from "./classification-provider.js";
-import type { Route, ThinkingLevel } from "./config.js";
+import type { ClassificationProviderSelection, Route, ThinkingLevel } from "./config.js";
 
 export const ROUTING_EXPLANATION_ENTRY_TYPE = "pi-jev-helm-routing-explanation";
 export const ROUTING_EXPLANATION_SCHEMA_VERSION = 1;
@@ -32,6 +32,13 @@ export interface ExplainedModelWithThinking extends ExplainedModel {
 
 export type RouteSource = "automatic" | "route-override";
 
+/**
+ * The Jev Client that classified (or whose unavailability failed the attempt
+ * open). Recorded only on automatic attempts: a Route Override bypasses Task
+ * Classification entirely.
+ */
+export type JevClientIdentity = ClassificationProviderSelection;
+
 export interface AttemptClassification {
   signals: ExplainedSignal[];
   confidenceCheck?: ExplainedConfidenceCheck;
@@ -41,6 +48,7 @@ export interface AttemptClassification {
 export interface ExplanationAttempt {
   runId: string;
   source: RouteSource;
+  jevClient?: JevClientIdentity;
   classification?: AttemptClassification;
 }
 
@@ -71,6 +79,7 @@ export type RoutingAttemptExplanation = {
   kind: "routing-attempt";
   runId: string;
   source: RouteSource;
+  jevClient?: JevClientIdentity;
   outcome: "routed" | "fail-open";
   restorationRequired: boolean;
   baseline?: ExplainedModelWithThinking;
@@ -257,6 +266,9 @@ export function formatRoutingExplanation(selected: SelectedRoutingExplanation): 
     );
   }
 
+  if (attempt.jevClient) {
+    lines.push(`Jev Client: ${attempt.jevClient}`);
+  }
   if (attempt.signals?.length) {
     lines.push(`Capability Signals: ${attempt.signals.map(formatSignal).join(", ")}`);
   }

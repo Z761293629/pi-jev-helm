@@ -11,6 +11,20 @@ deleted. A defective release is superseded by a new patch tag.
 
 ## [Unreleased]
 
+### Added
+
+- Classification Provider Selection: a new optional flat `classificationProvider`
+  field in `pi-jev-helm.json` chooses the Jev Client through which Task
+  Classification runs — `openrouter` (the default, today's behavior) or
+  `typesafe` (TypeSafe's official service, authenticated through Pi's own
+  credential system with `TYPESAFE_API_KEY` or `/login`). Unknown values are
+  rejected by configuration parsing with the field and its allowed values,
+  and a selection whose credential is missing leaves Automatic Routing
+  unavailable instead of substituting the other Jev Client; explicit Route
+  Overrides keep working. This schema addition is flagged to ship in
+  `0.2.0`; migration notes stating no action is required land with the
+  documentation ticket.
+
 ### Changed
 
 - Certified Pi `0.86.0` while retaining Pi `0.85.1` as the minimum supported
@@ -21,9 +35,10 @@ deleted. A defective release is superseded by a new patch tag.
 
 ### Upgrade and migration notes
 
-- No configuration or workflow changes are required. Pi Jev Helm continues to
-  use the OpenRouter Decisions API for Jev Task Classification; no Pi `0.86.0`
-  runtime API migration was needed.
+- No configuration or workflow changes are required. Automatic Routing
+  continues to classify through the OpenRouter Jev Client by default; the
+  opt-in `classificationProvider` selection above ships in `0.2.0` with its
+  own notes. No Pi `0.86.0` runtime API migration was needed.
 
 ## [0.1.0] — Public Preview (2026-09-19)
 
