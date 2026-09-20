@@ -7,34 +7,41 @@
 > [!WARNING]
 > **Pi Jev Helm is a Public Preview: pre-stable software with best-effort
 > support and no response-time commitment.** When Automatic Routing is on,
-> every new unit of work sends your current message — unmodified — to
-> OpenRouter as a paid classification request. Read
-> [Data, cost, and control](#data-cost-and-control) before enabling it, and
+> every new unit of work sends your current message — unmodified — to the
+> selected Jev Client (OpenRouter by default, TypeSafe on explicit selection)
+> as a paid classification request. Read
+> [Data, cost, and control](#data-cost-and-control) and
+> [Choosing the Jev Client](#choosing-the-jev-client) before enabling it, and
 > see [Public Preview status](#public-preview-status) for what the preview
 > contract does and does not promise.
 
 Pi Jev Helm is a [Pi](https://github.com/badlogic/pi-mono) extension that uses
-OpenRouter Jev judgments to classify a new unit of work and temporarily select
-an appropriate Pi model. It reduces manual model switching without taking
+Jev judgments — reached through the Jev Client you select, OpenRouter by
+default — to classify a new unit of work and temporarily select an appropriate
+Pi model. It reduces manual model switching without taking
 control away from the user: routing is explicit, configurable, inspectable,
 and fail-open. If classification or model switching fails, Pi continues with
 your existing **Baseline Model**.
 
 ## Public Preview status
 
-`v0.1.0` is an externally installable but pre-stable release. Within the
-`0.1.x` line, patch releases preserve the user-facing configuration schema and
-the `/helm` command grammar; breaking changes require a new minor version plus
-migration notes in the [changelog](CHANGELOG.md). Published `v*` tags are
-immutable — an installed tag always resolves to the same source
+`v0.1.0` is an externally installable but pre-stable release, and the
+changelog's prepared `0.2.0` entry adds the Classification Provider Selection
+behind migration notes that require no action. Within a minor line, patch
+releases preserve the user-facing configuration schema and the `/helm` command
+grammar; breaking changes require a new minor version plus migration notes in
+the [changelog](CHANGELOG.md). Published `v*` tags are immutable — an
+installed tag always resolves to the same source
 ([tag policy](docs/tag-policy.md)).
 
 The preview is feature-complete for its scope: the loadable extension, strict
-V1 configuration, automatic Jev Task Classification, deterministic Routing
-Policy, one-shot Route Override lifecycle, explicit user override precedence,
+V1 configuration, automatic Jev Task Classification, the Classification
+Provider Selection across the OpenRouter and TypeSafe Jev Clients, the
+Session Classification Provider Override, deterministic Routing Policy,
+one-shot Route Override lifecycle, explicit user override precedence,
 recoverable Baseline checkpoints, branch-aware Routing Explanations, live
-footer status, the real Jev compatibility gate, and the cross-version Pi
-public-API lifecycle certification are implemented. A future Safety Gate and
+footer status, the two-leg real Jev compatibility gate, and the cross-version
+Pi public-API lifecycle certification are implemented. A future Safety Gate and
 Verifier are *separate, uncommitted exploration directions* (see the V1
 specification, [issue #12](https://github.com/Z761293629/pi-jev-helm/issues/12));
 they are not part of this release and may never ship.
@@ -49,15 +56,16 @@ through the repository issue forms.
 | --- | --- |
 | Pi `0.85.1` or newer | Minimum certified version, pinned as the exact dev dependency and exercised by the executable Pi matrix (`npm run test:pi-matrix`). Current certification evidence covers the minimum Pi `0.85.1` and stable Pi `0.86.0`. |
 | Node.js `22.19.0` or newer (the runtime Pi itself runs on) | Declared in `package.json` `engines`; default CI runs typecheck, build, and the full deterministic suite on exactly `22.19.0` and current Node.js `24`. |
-| An OpenRouter credential, only for Automatic Routing | Supplied by Pi (`/login` or `OPENROUTER_API_KEY`), never by Helm's configuration. Not needed while Automatic Routing is off. |
+| A credential for the selected Jev Client, only for Automatic Routing | Supplied by Pi (`/login` or the provider's API key environment variable — `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY`), never by Helm's configuration. Not needed while Automatic Routing is off. See [Choosing the Jev Client](#choosing-the-jev-client). |
 | Models you can access for each Route | Any providers Pi supports. Helm resolves Route Targets exactly against Pi's model registry — no substitution, no fallback. |
 
 Platform status:
 
 - **Linux — verified.** Default CI (deterministic suite and Pi compatibility
   matrix) runs on Ubuntu.
-- **macOS — verified.** The real Jev compatibility gate certification (24/24
-  corpus messages) and the manual end-to-end acceptance runs were performed on
+- **macOS — verified.** The real Jev compatibility gate certifications (the
+  OpenRouter leg 24/24 corpus messages; the TypeSafe leg 24/24 in six of nine
+  full-gate runs) and the manual end-to-end acceptance runs were performed on
   macOS.
 - **Windows — unverified, best-effort.** Helm uses only Pi public APIs
   (including `getAgentDir()` for all paths) and has no known deliberate
@@ -132,6 +140,7 @@ reproducible setup; that is what the pinned tag is for.
    {
      "schemaVersion": 1,
      "automaticRouting": true,
+     "classificationProvider": "openrouter",
      "confidenceThreshold": 0.75,
      "routes": {
        "fast": {
@@ -176,7 +185,9 @@ reproducible setup; that is what the pinned tag is for.
    session-effective Automatic Routing state, pending Route Override, current
    or recent Route, and Baseline Model.
 
-Field reference: `automaticRouting` defaults to `true`; `confidenceThreshold`
+Field reference: `classificationProvider` is optional and defaults to
+`openrouter` — see [Choosing the Jev Client](#choosing-the-jev-client);
+`automaticRouting` defaults to `true`; `confidenceThreshold`
 defaults to `0.75` and must be a finite number in `[0,1]`; every standard
 Route (`fast`, `coding`, `reasoning`, `research`) requires exactly one
 complete Route Target; `thinkingLevel` is one of `off`, `minimal`, `low`,
@@ -203,36 +214,148 @@ recommended, and no provider or model listed there (or anywhere in this
 repository) is promised to be available to you. Choose identities from your
 own `pi --list-models` output that your accounts can actually access.
 
+## Choosing the Jev Client
+
+Task Classification is one implementation; the vendor protocol lives in a
+pluggable **Jev Client** beneath it
+([ADR 0003](docs/adr/0003-one-classification-provider-jev-client-seam.md)).
+Helm ships two:
+
+| | OpenRouter Jev Client (default) | TypeSafe Jev Client |
+| --- | --- | --- |
+| Reaches Jev through | OpenRouter's Decisions endpoint (`openrouter.ai`) | TypeSafe's official service, `api.typesafe.ai/v1/systemone`, via the official `@typesafe-ai/sdk` |
+| Classification model | `typesafe/jev-1.13` | `jev-1.13.0`, sent verbatim; aliases such as `jev-latest` are never requested or trusted |
+| Credential source | Pi's stored OpenRouter login, else `OPENROUTER_API_KEY` | Pi's stored TypeSafe login, else `TYPESAFE_API_KEY` |
+| Attempt shape | one 2500 ms attempt, no retries, abort pass-through | identical — the SDK is pinned to a single attempt inside the same shared deadline |
+| Per-request zero-data retention | requested with the `zdr: true` routing flag | no such mechanism exists; see [Data, cost, and control](#data-cost-and-control) |
+
+### Classification Provider Selection
+
+The **Classification Provider Selection** is the optional flat
+`classificationProvider` field in `pi-jev-helm.json`, demonstrated in the
+starter template:
+
+```json
+"classificationProvider": "openrouter"
+```
+
+Values are `openrouter` (the default, today's behavior) and `typesafe`; the
+[`examples/pi-jev-helm.json`](examples/pi-jev-helm.json) template pins the
+default explicitly so the selection is visible at a glance. The field is
+validated strictly: an unknown value fails configuration parsing with an
+error naming the field and its allowed values
+(`classificationProvider must be one of openrouter, typesafe`), never a
+silent fallback. Omitting the field is equivalent to `"openrouter"`, so
+pre-0.2.0 configurations keep working verbatim.
+
+Selection rules ([ADR 0002](docs/adr/0002-explicit-classification-provider-selection.md)):
+
+- **No fallback, ever.** A selection whose credential is missing leaves
+  Automatic Routing unavailable — exactly the behavior you get today without
+  an OpenRouter credential (a warning notification, a footer
+  `… · fail-open (provider-unavailable)`, and a Routing Explanation recording
+  the failure) — and Helm never substitutes the other Jev Client. Explicit
+  Route Overrides (`/helm route …`) keep working without any credential,
+  because they bypass Task Classification.
+- **Credentials stay in Pi.** Helm resolves the selected client's credential
+  through Pi's own credential system exactly as classification does: Pi's
+  stored login for that provider first (`/login`), then the provider's API
+  key environment variable. To authenticate the TypeSafe Jev Client, sign in
+  with `/login` for the `typesafe` provider or export `TYPESAFE_API_KEY`
+  before starting Pi. Helm never reads keys from `pi-jev-helm.json`.
+- **Attribution.** Every automatic attempt — success or fail-open — records
+  the Jev Client that served it in its Routing Explanation, visible through
+  `/helm why`.
+
+### Session Classification Provider Override
+
+```text
+/helm client openrouter
+/helm client typesafe
+/helm client clear
+```
+
+`/helm client` applies a **Session Classification Provider Override**: an
+explicit, non-persistent supersession of the configured Classification
+Provider Selection for the current session. It changes nothing on disk.
+
+- **Lifetime.** The override lives exactly as long as the current session:
+  `/reload`, a new session, resume, fork, and exit all discard it. It never
+  writes `pi-jev-helm.json` and adds no persistence records; the configured
+  selection is untouched.
+- **Credential behavior.** Selecting `openrouter` or `typesafe` resolves the
+  credential through Pi's registry exactly as classification does, so the
+  command works while Automatic Routing is off — but a missing credential
+  rejects the change and preserves the previous effective selection. There is
+  no credential auto-detection and no client fallback. `/helm client clear`
+  is always allowed: it restores the configured selection even when that
+  selection has no credential, warning in that case that Automatic Routing
+  is unavailable.
+- **Future attempts only.** A switch affects future classifications. An
+  in-flight Routed Run keeps the Jev Client snapshotted when it began, and
+  its Routing Explanation stays attributed to that client.
+- **Footer identity.** While configuration is healthy, every footer state is
+  prefixed with the effective Jev Client's human label:
+
+  ```text
+  pi-jev-helm: OpenRouter · auto
+  pi-jev-helm: TypeSafe · classifying
+  pi-jev-helm: TypeSafe · coding → provider/model
+  pi-jev-helm: TypeSafe · fail-open (provider-unavailable)
+  pi-jev-helm: OpenRouter · override coding
+  ```
+
+  The prefix never marks whether the selection came from configuration or a
+  session override; while an attempt is in flight it names the client
+  actually serving that run, and after `/helm route …` it names the selection
+  that would serve the next automatic classification (a Route Override never
+  invokes Jev itself). Configuration errors keep the existing unprefixed
+  `config error`, because an unhealthy configuration has no effective
+  selection. `/helm` status gains no Jev Client lines, and print, JSON, RPC,
+  and other machine-readable modes stay silent.
+
 ## Data, cost, and control
 
 Read this section **before** enabling Automatic Routing. It sits next to the
 switch on purpose.
 
 - **Your message leaves the machine.** With Automatic Routing on, each new
-  Routed Run sends your current user message, **unmodified**, to OpenRouter's
-  Decisions endpoint (`openrouter.ai`) for classification by the fixed model
-  `typesafe/jev-1.13`. Helm adds exactly one such attempt per new Routed Run
-  (2500 ms budget, no retries); it never sends conversation history, session
-  entries, or file contents.
-- **Zero-data retention has limits.** Every classification request asks
-  OpenRouter for zero-data-retention routing (`zdr: true`). ZDR constrains
-  what the receiving service retains or logs; it does **not** mean no data is
+  Routed Run sends your current user message, **unmodified**, to the selected
+  Jev Client for classification: by default OpenRouter's Decisions endpoint
+  (`openrouter.ai`) with fixed model `typesafe/jev-1.13`, or TypeSafe's
+  official evaluation service (`api.typesafe.ai/v1/systemone`) with pinned
+  model `jev-1.13.0` when you select the TypeSafe Jev Client (see
+  [Choosing the Jev Client](#choosing-the-jev-client)). Helm adds exactly one
+  such attempt per new Routed Run (2500 ms budget, no retries); it never
+  sends conversation history, session entries, or file contents.
+- **Zero-data retention has limits — and is OpenRouter-specific.** Every
+  OpenRouter-path classification request asks OpenRouter for
+  zero-data-retention routing (`zdr: true`). ZDR constrains what the
+  receiving service retains or logs; it does **not** mean no data is
   transmitted. Your message still leaves your machine and passes through
   OpenRouter and its upstream provider. Treat ZDR as a retention control, not
-  an air gap.
-- **Classification is a paid request.** It is billed against the OpenRouter
-  account behind Pi's credential, like any OpenRouter usage — small per run,
-  but real and recurring. (The maintainer-only real Jev compatibility gate is
-  a separate, much larger paid workload and never runs during normal use.)
+  an air gap. The TypeSafe path has **no per-request retention flag**: that
+  mechanism exists only in OpenRouter's routing layer. TypeSafe's published
+  posture states that customer content sent to its API is not used for
+  training, but per-request zero-retention on the TypeSafe path is available
+  only by contacting TypeSafe for enterprise arrangements — Helm cannot
+  switch it on. Verify TypeSafe's current terms before relying on them.
+- **Classification is a paid request.** It is billed against the account
+  behind Pi's credential for the selected Jev Client — the OpenRouter account
+  by default, or your TypeSafe account on the TypeSafe path — like any usage
+  of that service: small per run, but real and recurring. (The
+  maintainer-only real Jev compatibility gate is a separate, much larger paid
+  workload and never runs during normal use.)
 - **To disable:** run `/helm auto off` in Pi, or set `"automaticRouting":
   false` in the configuration file to default to off. With Automatic Routing
   off, Helm sends nothing anywhere; one-shot Route Overrides (`/helm route …`)
   keep working and also perform no classification, because they bypass it.
 - **Credentials stay in Pi.** The Helm configuration file has no credential
-  fields, and Helm never reads keys from it. The OpenRouter credential comes
-  exclusively through Pi's own facilities — `/login`, Pi's CLI/API key
-  options, or the `OPENROUTER_API_KEY` environment variable. Never put API
-  keys in `pi-jev-helm.json`.
+  fields, and Helm never reads keys from it. Credentials come exclusively
+  through Pi's own facilities — `/login`, Pi's CLI/API key options, or the
+  provider's API key environment variable (`OPENROUTER_API_KEY` for the
+  OpenRouter Jev Client, `TYPESAFE_API_KEY` for the TypeSafe Jev Client).
+  Never put API keys in `pi-jev-helm.json`.
 
 ## Upgrade
 
@@ -246,8 +369,9 @@ newer version. Upgrading is a deliberate step — check
 pi install git:github.com/Z761293629/pi-jev-helm@v0.1.1
 ```
 
-Patch releases in `0.1.x` preserve the configuration schema and command
-grammar, so a patch upgrade never requires config or workflow changes.
+Patch releases within a minor line preserve the configuration schema and
+command grammar, so a patch upgrade never requires config or workflow
+changes.
 
 **`main`** (`…@main`): `pi update --extensions` / `pi update --all` fetch and
 fast-forward the clone to the current `main`. You move with every upstream
@@ -288,7 +412,9 @@ part of model context, and disappear with the sessions they live in.
 
 For each new **Routed Run** started while Pi is idle, Helm:
 
-1. Sends the current user message to the OpenRouter Jev **Classification Provider**.
+1. Sends the current user message to the **Classification Provider**, which
+   evaluates it through the selected **Jev Client** (OpenRouter by default,
+   TypeSafe when selected).
 2. Produces a versioned **Task Classification** with three independent **Capability Signals**:
    - `codeWork`
    - `deepReasoning`
@@ -310,6 +436,7 @@ original request can continue.
 ## User control
 
 - Automatic Routing that can be disabled for the current extension instance (`/helm auto off`).
+- A session-scoped Jev Client choice (`/helm client openrouter|typesafe|clear`) that supersedes the configured Classification Provider Selection without touching configuration (see [Choosing the Jev Client](#choosing-the-jev-client)).
 - A one-shot Route Override for the next Routed Run (`/helm route fast|coding|reasoning|research|clear`).
 - Immediate precedence for direct user model or thinking-level changes.
 - A concise footer status and branch-aware routing records.
@@ -322,6 +449,7 @@ V1 command grammar:
 ```text
 /helm
 /helm auto on|off
+/helm client openrouter|typesafe|clear
 /helm route fast|coding|reasoning|research|clear
 /helm why
 ```
@@ -349,9 +477,17 @@ read-only informational result without duplicating the session entry.
 In the interactive TUI, one Helm footer status slot mirrors the live state:
 idle Automatic Routing on/off, a pending Route Override, classification in
 progress, the active Route and its Route Target, an Explicit Model Override,
-or a fail-open, configuration-error, or restoration outcome. After
-restoration the slot returns to the current idle or pending state instead of
-permanently displaying the previous result. Invalid configuration raises an
+or a fail-open, configuration-error, or restoration outcome. While
+configuration is healthy, every state carries the effective Jev Client's
+human label — `OpenRouter · auto`, `TypeSafe · classifying`,
+`TypeSafe · coding → provider/model`,
+`TypeSafe · fail-open (provider-unavailable)` — attributed to the client
+snapshotted for the in-flight run while one exists and otherwise to the
+selection that would serve the next automatic classification; the label does
+not distinguish the configured selection from a Session Classification
+Provider Override. Configuration errors keep the existing unprefixed
+`config error`. After restoration the slot returns to the current idle or
+pending state instead of permanently displaying the previous result. Invalid configuration raises an
 error notification; Provider, protocol, Route Target, and model-switch
 failures raise warnings; low-confidence fail-open is visible in the footer and
 Routing Explanation without a popup; successful routing and restoration stay
@@ -421,10 +557,11 @@ default.
    [`.github/workflows/ci.yml`](.github/workflows/ci.yml) on both declared
    Node.js runtimes: the exact minimum `22.19.0` and current Node.js `24`.
    Schema, configuration, Classification Provider contract, Routing Policy,
-   command/state, privacy, and Routed Run lifecycle tests include the Pi
-   public-API black-box suite with in-process fake models. No external
-   credentials, network, or paid calls are required; the workflow reads no
-   secret and never references `OPENROUTER_API_KEY`.
+   command/state (including the `/helm client` grammar), privacy, and Routed
+   Run lifecycle tests include the Pi public-API black-box suite with
+   in-process fake models. No external credentials, network, or paid calls
+   are required; the workflow reads no secret and never references
+   `OPENROUTER_API_KEY` or `TYPESAFE_API_KEY`.
 2. **Pi compatibility matrix** — `npm run test:pi-matrix`, also run as a
    dedicated default-CI job on Node.js `24`. It discovers the newest stable
    Pi version from npm at run time, installs it plus the pinned minimum into
@@ -432,21 +569,32 @@ default.
    build, and the complete deterministic suite against each. See
    [Compatibility](#compatibility).
 3. **Real Jev compatibility gate** —
-   `OPENROUTER_API_KEY=... npm run test:real-jev-gate`. Credentialed, paid,
-   probabilistic; excluded from default CI by construction and run explicitly.
-   At certification the gate passed all 24 corpus messages.
+   `OPENROUTER_API_KEY=... TYPESAFE_API_KEY=... npm run test:real-jev-gate`.
+   Credentialed, paid, probabilistic; excluded from default CI by construction
+   and run explicitly. The gate runs one leg per Jev Client: a leg executes
+   only when its own credential is present and is reported as explicitly
+   skipped otherwise, and a run with no credential for either leg fails
+   clearly before any network access. At certification the OpenRouter leg
+   passed all 24 corpus messages, and the TypeSafe leg passed all 24 corpus
+   messages in six of nine explicit full-gate runs — the corpus's designed
+   boundary example (`classification-v1/024`) failed its two-of-three vote in
+   the other three runs on genuine model variance at the low-confidence
+   boundary.
 
 The versioned `classification-v1` corpus (24 canonical messages in
 `src/classification-corpus.ts`) is protected by deterministic tests that run
-in default CI. The real OpenRouter/Jev compatibility gate reclassifies every
-corpus message against the live service with fixed model `typesafe/jev-1.13`,
-confidence threshold `0.75`, three independent executions per message, and a
-per-message two-of-three pass rule. It performs paid external requests, is
-never run by default CI or `npm test`, and fails clearly when credentials are
-missing. Run the gate before a release and whenever validating a Jev model or
-classification-template change; any substantive change to the
-`classification-v1` template requires a new template version plus a complete
-corpus rerun.
+in default CI. The real Jev compatibility gate reclassifies every corpus
+message against the live service — one leg per Jev Client, through the
+OpenRouter Jev Client with fixed model `typesafe/jev-1.13` and through the
+TypeSafe Jev Client with pinned model `jev-1.13.0` — with confidence
+threshold `0.75`, three independent executions per message, and a
+per-message two-of-three pass rule applied to each leg independently. It
+performs paid external requests, is never run by default CI or `npm test`,
+skips a leg explicitly when that leg's credential is missing, and fails
+clearly when neither credential is present. Run the gate before a release
+and whenever validating a Jev model or classification-template change; any
+substantive change to the `classification-v1` template requires a new
+template version plus a complete corpus rerun on every leg.
 
 ## Design principles
 
@@ -454,7 +602,10 @@ corpus rerun.
 - **The user remains authoritative.** Explicit model and thinking-level choices supersede Helm.
 - **Routing is scoped.** A Route Target applies only to its Routed Run and must not contaminate the next independent request.
 - **Failure is non-blocking.** Routing failures do not prevent Pi from handling the request.
-- **Configuration is exact.** There is no fuzzy model matching, nearest-model substitution, or cross-Route fallback.
+- **Configuration is exact.** There is no fuzzy model matching, nearest-model
+  substitution, cross-Route fallback — and no Jev Client fallback: a selected
+  client without its credential leaves Automatic Routing unavailable rather
+  than substituting the other.
 - **Diagnostics are privacy-conscious.** API keys, user messages, raw requests, raw responses, and upstream error text are excluded from records and failures.
 - **Only public Pi extension APIs are used.** V1 targets Pi 0.85.1 and the newest version proven compatible by the lifecycle test suite.
 
@@ -481,7 +632,9 @@ Classification Provider ──► Task Classification
                   status and Routing Explanation
 ```
 
-The Classification Provider hides OpenRouter/Jev protocol details. Routing
+The Classification Provider hides vendor protocol details behind the Jev
+Client seam — the OpenRouter Jev Client by default, the TypeSafe Jev Client
+on explicit selection. Routing
 Policy handles confidence and Route selection. Routed Run orchestration
 applies and restores Pi model state. Presentation exposes controls and
 factual explanations.
@@ -490,9 +643,12 @@ factual explanations.
 
 V1 uses three evidence layers:
 
-1. Deterministic schema, policy, configuration, command, privacy, and Provider contract tests, including the versioned `classification-v1` corpus (24 messages: every Boolean Capability Signal combination twice plus the semantic boundaries — verbosity is not Deep Reasoning, software discussion is not Code Work, local repository exploration is not External Research, ambiguous prompts fail open on low confidence).
+1. Deterministic schema, policy, configuration, command, privacy, and Provider contract tests — including the Session Classification Provider Override grammar, credential rejection, clear-with-warning, lifecycle reset, in-flight attribution, and every prefixed footer state — plus the versioned `classification-v1` corpus (24 messages: every Boolean Capability Signal combination twice plus the semantic boundaries — verbosity is not Deep Reasoning, software discussion is not Code Work, local repository exploration is not External Research, ambiguous prompts fail open on low confidence).
 2. Black-box Pi public-extension-API tests with in-process fake models (`test/pi-black-box.test.ts`, driven by `test/pi-harness.ts` through the real in-process Pi SDK). The suite covers all four Routes, Automatic Routing bypass, one-shot Route Override set/replace/clear/consumption (including while Automatic Routing is off), every fail-open path (Provider unavailable, classification failure, low confidence, unavailable or unappliable Route Target), Explicit Model and Thinking Overrides, the pre-application race, queued `steer` and `followUp` continuations, restoration, next-run isolation, branch-aware entries with `/helm why`, lifecycle recovery from an incomplete checkpoint, session replacement through Pi's `AgentSessionRuntime`, footer smoke states, and silence in print, JSON, and RPC modes — asserted through behavior and state tokens, never full-text snapshots.
-3. An explicitly invoked, credentialed real OpenRouter/Jev compatibility gate (`npm run test:real-jev-gate`), evaluated per message with a two-of-three rule so no aggregate pass rate can hide a consistently failing example.
+3. An explicitly invoked, credentialed real Jev compatibility gate
+   (`npm run test:real-jev-gate`), one leg per Jev Client, evaluated per
+   message with a two-of-three rule so no aggregate pass rate can hide a
+   consistently failing example.
 
 External probabilistic calls are excluded from default CI. The deterministic
 suite is certified on Node.js `22.19.0` (declared minimum) and `24` by the CI
@@ -520,9 +676,9 @@ pi -e ./src/index.ts
 ## License and versioning
 
 Pi Jev Helm is released under the [MIT License](LICENSE). User-facing changes
-are summarized in [CHANGELOG.md](CHANGELOG.md); within `0.1.x`, patches
-preserve the configuration schema and command grammar, and breaking changes
-require a new minor version with migration notes. Distribution uses immutable
+are summarized in [CHANGELOG.md](CHANGELOG.md); within a minor release line,
+patches preserve the configuration schema and command grammar, and breaking
+changes require a new minor version with migration notes. Distribution uses immutable
 Git tags only — see the [tag policy](docs/tag-policy.md) and
 [ADR 0001](docs/adr/0001-release-public-preview-from-git-tags.md).
 
