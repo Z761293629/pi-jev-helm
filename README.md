@@ -63,10 +63,11 @@ Platform status:
 
 - **Linux — verified.** Default CI (deterministic suite and Pi compatibility
   matrix) runs on Ubuntu.
-- **macOS — verified.** The real Jev compatibility gate certifications (the
-  OpenRouter leg 24/24 corpus messages; the TypeSafe leg 24/24 in six of nine
-  full-gate runs) and the manual end-to-end acceptance runs were performed on
-  macOS.
+- **macOS — verified.** Explicit real Jev compatibility gate runs were
+  performed on macOS, alongside the manual end-to-end acceptance runs:
+  OpenRouter leg 24/24 corpus messages; TypeSafe leg 24/24 in six of nine
+  full-gate runs, with the corpus's boundary example failing its two-of-three
+  vote in the other three (see [Verification tiers](#verification-tiers)).
 - **Windows — unverified, best-effort.** Helm uses only Pi public APIs
   (including `getAgentDir()` for all paths) and has no known deliberate
   platform coupling, but there is no Windows CI, certification, or acceptance
