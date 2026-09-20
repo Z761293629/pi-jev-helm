@@ -39,11 +39,16 @@ function escaped(text: string): string {
 
 function runTagValidator(tag: string): number {
   const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  // The script prefers GITHUB_REF_NAME over argv — the Release Gate relies
+  // on that precedence to validate the pushed ref — so the test pins the
+  // environment explicitly instead of depending on the ambient (on CI:
+  // branch-named) GITHUB_REF_NAME.
   // A null status means the child died on a signal: treat it as the failure
   // it is, never as a passing exit code.
   return spawnSync(process.execPath, ["scripts/validate-release-tag.mjs", tag], {
     cwd: repoRoot,
     encoding: "utf8",
+    env: { ...process.env, GITHUB_REF_NAME: tag },
   }).status ?? 1;
 }
 
