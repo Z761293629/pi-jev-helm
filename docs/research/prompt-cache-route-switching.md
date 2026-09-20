@@ -297,19 +297,29 @@ Two distinct quantities must never be conflated:
   at ≥ $0.05 expected savings) is the only first-party counterfactual estimate Pi
   exposes, via `cache_warming_decision` (§1.4).
 
-### 3.1 Net utility of switching at a decision point
+### 3.1 Two-axis switch accounting at a decision point
+
+Quality scores and dollar costs have different units. They must not be subtracted
+unless the experiment predeclares and justifies a quality-to-dollar utility
+conversion. The Wayfinder map instead chose quality-first constrained optimization:
+measure the two axes separately, require a statistically significant quality gain,
+and apply the approximately 20% cost/latency guardrail.
 
 At a decision point with prefix size `T` tokens, current target `A`, candidate
 target `B`, and a remaining-run horizon of `k` provider calls:
 
 ```
-NetUtility(switch A→B) = (Q_B − Q_A)                      // quality gain, eval-defined
-                       − ΔCache(A→B, T, k)                // cache-loss/rebuild cost
-                       − ΔTok(B vs A)                     // any residual token/price differences
+QualityDelta(A→B) = Q_B − Q_A
+CostDelta(A→B)    = ΔCache(A→B, T, k) + ΔTok(B vs A)
+
+Eligible(A→B) = QualityDelta is statistically significant
+                AND CostDelta stays within the predeclared guardrail
 ```
 
-with the cache term decomposed, using each side's own pricing multipliers
-(`r_X` = read rate, `w_X` = write rate, `p_X` = base input rate of target X):
+A candidate outside the guardrail requires a separately predeclared exception rule
+for how much extra cost is acceptable for a measured quality gain; absent that rule,
+the decision is **stay**. The cache term is decomposed using each side's own pricing
+multipliers (`r_X` = read rate, `w_X` = write rate, `p_X` = base input rate of target X):
 
 ```
 ΔCache(A→B, T, k) ≈ [ p_B·T·w_B − p_A·T·r_A ]             // call 1: rebuild on B vs read on A
@@ -348,14 +358,14 @@ Interpretation per provider (all numbers from §2):
    the realized cost of switching. Where they disagree, trust the measured
    difference and revise the multiplier assumptions.
 4. **Quality term.** `Q` comes from the task-result evaluation protocol (the
-   experiment family in the Wayfinder map, issues #66/#67); cache accounting only
-   prices the `ΔCache` penalty side.
-5. **Decision rule.** Upgrade only if
-   `Q_B − Q_A > α · max(ΔCache_estimate, measured ΔCache prior)`, with `α ≥ 1`
-   (safety factor ≥ 1 because estimates are optimistic exactly when data is missing).
-   Absent a quality difference, the default is **stay** — this matches Helm's
-   fail-open philosophy (routing failures never block; uncertainty retains the
-   Baseline).
+   experiment family in the Wayfinder map, issues #66/#67). Keep it separate from
+   dollar cost unless that protocol explicitly defines a conversion.
+5. **Decision rule.** Upgrade only when the quality gain is statistically significant
+   and `max(ΔCache_estimate, measured ΔCache prior)` plus residual token/price cost
+   stays within the predeclared cost guardrail. If the cost increase exceeds the
+   guardrail, require the protocol's explicit exception rule; absent that rule, or
+   absent a quality difference, default to **stay**. This matches Helm's fail-open
+   philosophy (routing failures never block; uncertainty retains the Baseline).
 
 ### 3.3 Realized vs predicted, explicitly
 
@@ -389,14 +399,13 @@ Detection first, then a bounded cost model:
    because caching can only make the truth cheaper than the bound.
 3. **Symmetrically floor the “stay” benefit.** Assume staying also achieves no
    further hits (its cache may expire anyway); i.e. do not credit `stay` with
-   unverified read discounts either. The rule then reduces to comparing quality
-   gain against a pure full-price input difference — deliberately unfavorable to
-   switching.
-4. **Default to the run boundary.** If the projected quality gain does not clear the
-   conservative bound (or quality is unknown), defer the upgrade to the next Routed
-   Run boundary, where Helm already switches targets at zero marginal cache loss
-   (the run is starting cold regardless). This preserves the one-way property
-   without paying a mid-run rebuild on a guess.
+   unverified read discounts either. Feed the resulting full-price input difference
+   into the cost guardrail — do not convert it into a quality score.
+4. **Prefer the run boundary when uncertain.** If quality is unknown or the
+   conservative switch-cost bound exceeds the guardrail, defer the upgrade to the
+   next Routed Run boundary. The boundary is lifecycle-safer and easier to measure,
+   but it is **not cache-free**: an existing Baseline or prior-target prefix may
+   still be warm, so the next-run decision must price its cache loss too.
 5. **Record the uncertainty.** Append a custom (non-context) entry marking the arm's
    cache telemetry as untrusted, mirroring Helm's existing
    `pi-jev-helm-baseline-checkpoint` / routing-explanation entry pattern, so later
@@ -451,12 +460,13 @@ Target. Against the findings above:
    upgrade moment is chosen by a background evaluation — use
    `cache_warming_decision`'s `missCost` as the live estimate of what staying is
    worth (§1.4). No production-code changes are needed to *measure*; only to *act*.
-6. **Quality must clear a real, priced bar.** Because issue #77's upgrades are
-   one-way, the “stay” counterfactual dies at the switch (§3.3): the experiment
-   needs control arms to price `ΔCache`, and the conservative rule (§4) governs any
-   provider whose cache data is missing — with OpenRouter targets that means
-   pinning `provider.order`/`only` (as Helm's Route Targets already can) so cache
-   locality is not at the mercy of sticky-routing drift (§2.3).
+6. **Quality and cost must clear separate predeclared gates.** Because issue #77's
+   upgrades are one-way, the “stay” counterfactual dies at the switch (§3.3): the
+   experiment needs control arms to price `ΔCache`, then requires statistically
+   significant quality improvement within the cost guardrail. The conservative rule
+   (§4) governs any provider whose cache data is missing — with OpenRouter targets
+   that means pinning `provider.order`/`only` (as Helm's Route Targets already can)
+   so cache locality is not at the mercy of sticky-routing drift (§2.3).
 
 ---
 
@@ -471,18 +481,19 @@ Target. Against the findings above:
 2. **P0 — Adopt `(model, thinkingLevel)` as the accounting identity**, not model
    alone, and segment run costs at every recorded route/override boundary
    (§5.3).
-3. **P1 — Implement the §3.1 net-utility formula in the experiment scorer**, with
+3. **P1 — Implement the §3.1 two-axis accounting in the experiment scorer**, with
    provider multipliers drawn from the Route Targets' own `cost` metadata
    (`cacheRead`, `cacheWrite` rates Pi already carries) and `T` from the last
    assistant message's input totals; validate `ΔCache` estimates against stay/switch
-   control arms (§3.2–3.3).
-4. **P1 — Codify the conservative rule (§4) as a gate**: untrusted cache telemetry ⇒
-   no-cache upper bound for the switch and no read credit for staying ⇒ upgrade only
-   on quality gains that clear the bound, else defer to the next run boundary.
-5. **P2 — Prefer run-boundary upgrades over mid-run upgrades** unless the measured
-   `ΔCache` is small relative to the quality gain (short runs, small context, or
-   free-write targets such as pre-5.6 OpenAI and implicit-caching Gemini, where the
-   §3.1 write term vanishes and upgrades are cheapest).
+   control arms (§3.2–3.3). Keep quality and dollars separate.
+4. **P1 — Codify the conservative rule (§4) as a cost gate**: untrusted cache
+   telemetry ⇒ no-cache upper bound for the switch and no read credit for staying ⇒
+   upgrade only when quality improves significantly and the bound fits the
+   predeclared guardrail; otherwise prefer staying or the next run boundary.
+5. **P2 — Prefer run-boundary upgrades over mid-run upgrades** unless quality
+   improves significantly and measured `ΔCache` fits the cost guardrail (most likely
+   for short runs, small context, or free-write targets such as pre-5.6 OpenAI and
+   implicit-caching Gemini, where the §3.1 write term vanishes).
 6. **P2 — Pin OpenRouter-backed Route Targets** (`compat.openRouterRouting.only` /
    `order`) when measuring or optimizing cache, so sticky-routing drift cannot
    silently zero `cacheRead` between arms; prefer direct provider targets for
