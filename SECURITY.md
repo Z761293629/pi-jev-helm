@@ -8,11 +8,11 @@ no guaranteed fix timeline.
 
 | Version or ref | Status |
 | --- | --- |
-| Current `v0.1.x` tag (Public Preview) | Supported. Security fixes ship as a new patch tag. |
-| Older published tags in the `v0.1.x` line | Superseded. Upgrade to the current patch tag. |
+| Current `v0.2.x` tag (Public Preview) | Supported. Security fixes ship as a new patch tag. |
+| Older published tags (the `v0.1.x` line and superseded `v0.2.x` patches) | Superseded. Upgrade to the current patch tag. |
 | `main` (unreleased) | Best-effort only. Testers following `main` accept unreleased changes. |
 
-Within the `v0.1.x` preview line, patch releases preserve the user-facing
+Within the `v0.2.x` preview line, patch releases preserve the user-facing
 configuration schema and command grammar; breaking changes require a new minor
 version and migration notes. Published tags are immutable: a release with a
 security defect is superseded by a new patch version, never fixed by moving an

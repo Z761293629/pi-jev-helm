@@ -13,7 +13,7 @@ deleted. A defective release is superseded by a new patch tag.
 
 Nothing yet.
 
-## [0.2.0] — Public Preview (unreleased)
+## [0.2.0] — Public Preview (2026-09-20)
 
 Adds a second path to Jev: the Classification Provider Selection chooses
 between the OpenRouter Jev Client (the default, unchanged behavior) and the
@@ -127,12 +127,12 @@ best-effort, and the next minor version may change the contract.
 
 ## Versioning policy
 
-- Within one minor release line (currently `0.1.x`), patch releases preserve
+- Within one minor release line (currently `0.2.x`), patch releases preserve
   the user-facing configuration schema (`pi-jev-helm.json`, `schemaVersion 1`)
   and the `/helm` command grammar. Upgrading a patch release never requires
   configuration or workflow changes.
 - Breaking changes to the configuration schema, command grammar, or documented
-  behavior require a new minor version (for example `0.2.0`) and migration
+  behavior require a new minor version (for example `0.3.0`) and migration
   notes in this changelog.
 - Public `v*` tags are immutable. A failed release is superseded by a new
   patch tag, never by moving an existing one; see the
