@@ -29,7 +29,7 @@ node prototypes/local-sample-pipeline/export-samples.mjs --stats                
 
 ## Boundary decisions to react to (this is the HITL part)
 
-- **样本单元 = run-opening 请求**，continuation 单独标记备用 —— 而不是整段会话。理由：分类器的输入就是这条；整段会话会带出助手输出与工具结果，泄露面大一个数量级。
+- **样本单元 = run-opening 请求**，continuation 单独标记备用 —— 而不是整段会话。理由：分类器的输入就是这条；整段会话会带出助手输出与工具结果，泄露面大一个数量级。**上下文依赖的补偿**：导出时自动旗标指代词（继续/接着/前面/continue…），审阅单逐条判 self-contained；不自足的样本由人工手写一句话 capsule（过脱敏、进审阅），**绝不导出原始历史** —— capsule 恢复可重放性，隐私边界不动。
 - **池放 `~/.pi-jev-helm-eval/` 而不是仓库内 gitignore 目录** —— gitignore 依赖人不出错，物理隔离不依赖。
 - **残余风险只旗标不自动删** —— URL/提及/关键词误报率高，自动删会毁掉代表性；交给人眼终审。
 - **id = 脱敏文本的 sha256 前 12 位** —— 天然去重，且不泄露原文。

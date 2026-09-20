@@ -115,6 +115,9 @@ function extractRuns(file) {
 
 // ---------- review sheet ----------
 
+// Heuristic: does this request seem to depend on prior conversation context?
+const CONTEXT_HINT = /(继续|接着|接下来|再试|还是|上面|前面|之前|刚才|那个文件|同一个|这张图|continue|go on|as before|same as|last time|prior session)/i;
+
 function reviewSheet(candidates) {
   const blocks = candidates.map((c) => {
     const lines = [
@@ -125,6 +128,9 @@ function reviewSheet(candidates) {
       `- run usage: turns=${c.meta.usage.turns} cost=${c.meta.usage.cost.toFixed(4)} in=${c.meta.usage.input} out=${c.meta.usage.output} cacheR=${c.meta.usage.cacheRead} cacheW=${c.meta.usage.cacheWrite}`,
       `- redactions: ${c.redactions.length ? c.redactions.map((x) => `${x.tag}×${x.count}`).join(', ') : 'none'}`,
       `- residual flags: ${c.residual.length ? '⚠ ' + c.residual.join(', ') : 'none'}`,
+      c.meta.kind === 'run-opening'
+        ? `- self-contained: ${c.meta.contextHint ? '⚠ 开头含上下文指代词，需人判' : 'likely yes (reviewer judges)'}`
+        : `- self-contained: N/A (continuation — 重放评测需 capsule)`,
       '',
       '```',
       c.text.length > 1500 ? c.text.slice(0, 1500) + `\n…[truncated ${c.text.length - 1500} chars]` : c.text,
@@ -133,7 +139,7 @@ function reviewSheet(candidates) {
     ];
     return lines.join('\n');
   });
-  return `# Review sheet — sanitized candidates\n\nApprove: node export-samples.mjs --confirm <id> · Reject: --reject <id>\n\n${blocks.join('\n')}`;
+  return `# Review sheet — sanitized candidates\n\nApprove: node export-samples.mjs --confirm <id> · 带背景: --confirm <id> --capsule "一句话任务背景" · Reject: --reject <id>\n\n${blocks.join('\n')}`;
 }
 
 // ---------- commands ----------
@@ -175,6 +181,7 @@ function cmdExport(files) {
           chars: run.rawText.length,
           cjkRatio: +cjk.toFixed(2),
           hadNonTextParts: run.hadNonTextParts,
+          contextHint: CONTEXT_HINT.test(run.rawText.slice(0, 120)),
           usage: run.usage,
         },
         redactions,
@@ -203,12 +210,18 @@ function loadPool() {
     JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
 }
 
-function cmdConfirm(id) {
+function cmdConfirm(id, capsule) {
   const file = path.join(poolDir, 'pool', `${id}.json`);
   const c = JSON.parse(fs.readFileSync(file, 'utf8'));
   c.status = 'approved';
+  if (capsule != null) {
+    c.standalone = false;
+    c.capsule = sanitize(capsule).text;
+  } else {
+    c.standalone = true;
+  }
   fs.writeFileSync(file, JSON.stringify(c, null, 2));
-  console.log(`approved ${id}`);
+  console.log(`approved ${id} (standalone=${c.standalone}${c.capsule ? ', capsule added' : ''})`);
 }
 
 function cmdReject(id) {
@@ -228,13 +241,20 @@ function cmdStats() {
   console.log('by kind:', JSON.stringify(tally((c) => c.meta.kind)));
   console.log('by project:', JSON.stringify(tally((c) => c.meta.project)));
   console.log('by route:', JSON.stringify(tally((c) => c.meta.route ?? 'none')));
+  console.log('context-hinted openers:', all.filter((c) => c.meta.contextHint).length);
+  console.log('standalone:', all.filter((c) => c.standalone).length, ' with-capsule:', all.filter((c) => c.capsule).length);
   console.log('redacted:', all.filter((c) => c.redactions.length).length, ' flagged:', all.filter((c) => c.residual.length).length);
 }
 
 switch (mode) {
   case '--list': cmdList(args[1]); break;
   case '--export': cmdExport(args.slice(1)); break;
-  case '--confirm': cmdConfirm(args[1]); break;
+  case '--confirm': {
+    const i = args.indexOf('--capsule');
+    const capsule = i === -1 ? null : args[i + 1];
+    cmdConfirm(args[1], capsule);
+    break;
+  }
   case '--reject': cmdReject(args[1]); break;
   case '--stats': cmdStats(); break;
   default:
