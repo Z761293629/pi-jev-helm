@@ -1036,6 +1036,12 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
 }
 
 export default function helmExtension(pi: ExtensionAPI): void {
+  pi.registerProvider("typesafe", {
+    name: "TypeSafe",
+    apiKey: "$TYPESAFE_API_KEY",
+    models: [],
+  });
+
   const state: HelmState = {
     configuration: initialConfiguration(),
     automaticRoutingOverride: undefined,

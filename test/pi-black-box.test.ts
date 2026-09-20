@@ -87,6 +87,37 @@ afterEach(async () => {
 });
 
 describe("Pi public-API compatibility (black-box, in-process fake models)", () => {
+  it("registers auth-only TypeSafe credentials with stored-login precedence and environment fallback", async () => {
+    const originalApiKey = process.env.TYPESAFE_API_KEY;
+    process.env.TYPESAFE_API_KEY = "typesafe-environment-key";
+
+    try {
+      const harness = await start({ automaticRouting: false });
+
+      expect(harness.modelRuntime.getProvider("typesafe")?.name).toBe("TypeSafe");
+      expect(harness.modelRuntime.getModels("typesafe")).toEqual([]);
+      expect(await harness.modelRegistry.getApiKeyForProvider("typesafe")).toBe(
+        "typesafe-environment-key",
+      );
+
+      await harness.modelRuntime.login("typesafe", "api_key", {
+        prompt: async () => "typesafe-stored-login-key",
+        notify: () => {},
+      });
+      expect(await harness.modelRegistry.getApiKeyForProvider("typesafe")).toBe(
+        "typesafe-stored-login-key",
+      );
+
+      await harness.modelRuntime.logout("typesafe");
+      expect(await harness.modelRegistry.getApiKeyForProvider("typesafe")).toBe(
+        "typesafe-environment-key",
+      );
+    } finally {
+      if (originalApiKey === undefined) delete process.env.TYPESAFE_API_KEY;
+      else process.env.TYPESAFE_API_KEY = originalApiKey;
+    }
+  });
+
   for (const [route, decision] of [
     ["fast", { codeWork: 0.1, deepReasoning: 0.15, externalResearch: 0.1 }],
     ["coding", { codeWork: 0.95, deepReasoning: 0.1, externalResearch: 0.1 }],

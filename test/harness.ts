@@ -59,6 +59,7 @@ export function createHarness(
 ) {
   const events = new Map<string, EventHandler[]>();
   const commands = new Map<string, HelmCommand>();
+  const providerRegistrations = new Map<string, unknown>();
   const notices: Notice[] = [];
   const statuses: Array<{ key: string; text: string }> = [];
   const modelChanges: string[] = [];
@@ -163,6 +164,9 @@ export function createHarness(
     registerCommand(name: string, command: HelmCommand) {
       commands.set(name, command);
     },
+    registerProvider(name: string, config: unknown) {
+      providerRegistrations.set(name, config);
+    },
     appendEntry(customType: string, data?: unknown) {
       if (options.appendEntryErrors?.shift() ?? options.appendEntryError) {
         throw new Error("session storage unavailable");
@@ -210,6 +214,7 @@ export function createHarness(
 
   return {
     commands,
+    providerRegistrations,
     events,
     notices,
     statuses,
