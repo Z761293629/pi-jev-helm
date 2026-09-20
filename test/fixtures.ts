@@ -69,6 +69,26 @@ export function createDecisionsResponse(probabilities: {
   );
 }
 
+/** A winning SystemOne envelope as TypeSafe's official endpoint returns it. */
+export function createTypeSafeDecisionsResponse(probabilities: {
+  codeWork: number;
+  deepReasoning: number;
+  externalResearch: number;
+}): Response {
+  return new Response(
+    JSON.stringify({
+      model: "jev-1.13.0",
+      usage: { input_tokens: 12, output_tokens: 3 },
+      answers: {
+        codeWork: { type: "noul", noul: probabilities.codeWork },
+        deepReasoning: { type: "noul", noul: probabilities.deepReasoning },
+        externalResearch: { type: "noul", noul: probabilities.externalResearch },
+      },
+    }),
+    { status: 200 },
+  );
+}
+
 export function restoreAgentDirectory(originalAgentDir: string | undefined): void {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = originalAgentDir;

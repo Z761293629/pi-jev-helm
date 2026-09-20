@@ -26,6 +26,7 @@ export type FakeSessionEntry = {
   data?: unknown;
 };
 export type HarnessOptions = {
+  apiKeysByProvider?: Record<string, string | undefined>;
   appendEntryError?: boolean;
   appendEntryErrors?: boolean[];
   appliedModels?: Record<string, FakeModel[]>;
@@ -106,6 +107,9 @@ export function createHarness(
         return models.find((model) => model.provider === provider && model.id === id);
       },
       async getApiKeyForProvider(provider: string) {
+        if (Object.hasOwn(options.apiKeysByProvider ?? {}, provider)) {
+          return options.apiKeysByProvider?.[provider];
+        }
         return provider === "openrouter" ? "test-openrouter-key" : undefined;
       },
     },

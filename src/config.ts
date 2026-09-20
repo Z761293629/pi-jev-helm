@@ -10,6 +10,14 @@ export const DEFAULT_CONFIDENCE_THRESHOLD = 0.75;
 export const ROUTES = ["fast", "coding", "reasoning", "research"] as const;
 export type Route = (typeof ROUTES)[number];
 
+/**
+ * The Jev Clients a Classification Provider Selection can name, in the order
+ * the parse error reports them (CONTEXT.md: Classification Provider Selection).
+ */
+export const CLASSIFICATION_PROVIDERS = ["openrouter", "typesafe"] as const;
+export type ClassificationProviderSelection = (typeof CLASSIFICATION_PROVIDERS)[number];
+export const DEFAULT_CLASSIFICATION_PROVIDER: ClassificationProviderSelection = "openrouter";
+
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
@@ -22,6 +30,7 @@ export interface RouteTarget {
 export interface HelmConfigV1 {
   schemaVersion: 1;
   automaticRouting: boolean;
+  classificationProvider: ClassificationProviderSelection;
   confidenceThreshold: number;
   routes: Record<Route, RouteTarget>;
 }
@@ -34,7 +43,13 @@ export type ConfigLoadResult =
   | { ok: true; path: string; config: HelmConfigV1 }
   | { ok: false; path: string; errors: string[] };
 
-const TOP_LEVEL_KEYS = ["schemaVersion", "automaticRouting", "confidenceThreshold", "routes"] as const;
+const TOP_LEVEL_KEYS = [
+  "schemaVersion",
+  "automaticRouting",
+  "classificationProvider",
+  "confidenceThreshold",
+  "routes",
+] as const;
 const TARGET_KEYS = ["provider", "model", "thinkingLevel"] as const;
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -107,6 +122,13 @@ export function parseHelmConfig(value: unknown): ConfigParseResult {
   }
 
   if (
+    value.classificationProvider !== undefined &&
+    !CLASSIFICATION_PROVIDERS.includes(value.classificationProvider as ClassificationProviderSelection)
+  ) {
+    errors.push(`classificationProvider must be one of ${CLASSIFICATION_PROVIDERS.join(", ")}`);
+  }
+
+  if (
     value.confidenceThreshold !== undefined &&
     (typeof value.confidenceThreshold !== "number" ||
       !Number.isFinite(value.confidenceThreshold) ||
@@ -138,6 +160,9 @@ export function parseHelmConfig(value: unknown): ConfigParseResult {
     config: {
       schemaVersion: 1,
       automaticRouting: (value.automaticRouting as boolean | undefined) ?? DEFAULT_AUTOMATIC_ROUTING,
+      classificationProvider:
+        (value.classificationProvider as ClassificationProviderSelection | undefined) ??
+        DEFAULT_CLASSIFICATION_PROVIDER,
       confidenceThreshold:
         (value.confidenceThreshold as number | undefined) ?? DEFAULT_CONFIDENCE_THRESHOLD,
       routes: {

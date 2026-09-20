@@ -16,8 +16,9 @@ import {
   type ClassificationResult,
   type TaskClassificationV1,
 } from "./classification-provider.js";
-import { loadHelmConfig, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
+import { loadHelmConfig, type ClassificationProviderSelection, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
 import { selectRoute, type RoutingPolicyResult } from "./routing-policy.js";
+import { TypeSafeJevClient } from "./typesafe-jev-client.js";
 import {
   formatRoutingExplanation,
   formatSource,
@@ -333,6 +334,7 @@ function recordAttemptExplanation(
     | "kind"
     | "runId"
     | "source"
+    | "jevClient"
     | "signals"
     | "confidenceCheck"
     | "policyBranch"
@@ -345,6 +347,7 @@ function recordAttemptExplanation(
     kind: "routing-attempt",
     runId: attempt.runId,
     source: attempt.source,
+    ...(attempt.jevClient ? { jevClient: attempt.jevClient } : {}),
     ...(attempt.classification?.signals.length
       ? { signals: attempt.classification.signals }
       : {}),
@@ -831,13 +834,25 @@ async function beginRoutedRun(
   }
 }
 
+/**
+ * Composes the selected Jev Client behind the single Classification Provider
+ * (ADR 0003) and resolves its credential through the same registry call used
+ * for OpenRouter: Pi's stored login first, `TYPESAFE_API_KEY` as the
+ * environment fallback for the typesafe selection. A selection whose
+ * credential is missing leaves Automatic Routing unavailable; the other Jev
+ * Client is never substituted (ADR 0002).
+ */
 async function createClassificationProvider(
   ctx: ExtensionContext,
+  selection: ClassificationProviderSelection,
 ): Promise<ClassificationProvider | undefined> {
-  const apiKey = await ctx.modelRegistry.getApiKeyForProvider("openrouter");
-  return apiKey
-    ? new JevClassificationProvider({ client: new OpenRouterJevClient({ apiKey }) })
-    : undefined;
+  const apiKey = await ctx.modelRegistry.getApiKeyForProvider(selection);
+  if (!apiKey) return undefined;
+  const client =
+    selection === "typesafe"
+      ? new TypeSafeJevClient({ apiKey })
+      : new OpenRouterJevClient({ apiKey });
+  return new JevClassificationProvider({ client });
 }
 
 async function beginAutomaticRouting(
@@ -847,9 +862,16 @@ async function beginAutomaticRouting(
   state: HelmState,
 ): Promise<void> {
   if (!state.configuration.ok) return;
+  const classificationProviderSelection = state.configuration.config.classificationProvider;
   const cancellationRevision = state.routeTargetApplicationRevision;
   const runId = randomUUID();
-  const attempt: ExplanationAttempt = { runId, source: "automatic" };
+  const attempt: ExplanationAttempt = {
+    runId,
+    source: "automatic",
+    // Attribution stays with the selected Jev Client even when the attempt
+    // fails open on a missing credential: the other client is never tried.
+    jevClient: classificationProviderSelection,
+  };
   let attemptRecorded = false;
   const recordFailOpen = (failOpen: ExplainedFailOpen, classification?: AttemptClassification): void => {
     attemptRecorded = true;
@@ -864,7 +886,7 @@ async function beginAutomaticRouting(
   };
 
   try {
-    const classificationProvider = await createClassificationProvider(ctx);
+    const classificationProvider = await createClassificationProvider(ctx, classificationProviderSelection);
     if (state.routeTargetApplicationRevision !== cancellationRevision) return;
     if (!classificationProvider) {
       recordFailOpen({ reason: "provider-unavailable", baselineRetained: true });
@@ -930,6 +952,7 @@ async function beginAutomaticRouting(
       {
         route: decision.route,
         source: "automatic",
+        jevClient: classificationProviderSelection,
         cancellationRevision,
         runId,
         classification: automaticClassificationDetails(state, result.classification, decision),

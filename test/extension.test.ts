@@ -3,10 +3,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { CLASSIFICATION_MODEL, OPENROUTER_DECISIONS_URL } from "../src/openrouter-jev-client.js";
+import {
+  TYPESAFE_API_BASE_URL,
+  TYPESAFE_CLASSIFICATION_MODEL,
+  TYPESAFE_SYSTEMONE_PATH,
+} from "../src/typesafe-jev-client.js";
+
 import {
   checkpointData,
   completeRoutes,
   createDecisionsResponse,
+  createTypeSafeDecisionsResponse,
   deferred,
   explanationData,
   restoreAgentDirectory,
@@ -1577,5 +1585,136 @@ describe("Pi Jev Helm extension", () => {
       { value: "route coding", label: "route coding" },
       { value: "route clear", label: "route clear" },
     ]);
+  });
+});
+
+describe("Classification Provider Selection end to end", () => {
+  beforeEach(async () => {
+    agentDir = await mkdtemp(join(tmpdir(), "pi-jev-helm-selection-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+  });
+
+  afterEach(() => {
+    restoreAgentDirectory(originalAgentDir);
+    vi.unstubAllGlobals();
+  });
+
+  function writeConfig(overrides: Record<string, unknown> = {}): Promise<void> {
+    return writeHelmConfig(agentDir, overrides);
+  }
+
+  async function runIdleRequest(harness: Awaited<ReturnType<typeof createHarness>>): Promise<void> {
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.emit("input", { text: "please fix this failing test", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "please fix this failing test" });
+  }
+
+  it("classifies through the TypeSafe Jev Client when selected with a credential", async () => {
+    await writeConfig({ automaticRouting: true, classificationProvider: "typesafe" });
+    const transport = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        createTypeSafeDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness("tui", {
+      apiKeysByProvider: { typesafe: "test-typesafe-key" },
+    });
+
+    await runIdleRequest(harness);
+
+    expect(transport).toHaveBeenCalledTimes(1);
+    const [input, init] = transport.mock.calls[0]!;
+    expect(input).toBe(`${TYPESAFE_API_BASE_URL}${TYPESAFE_SYSTEMONE_PATH}`);
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-typesafe-key");
+    expect(JSON.parse(String(init?.body)).model).toBe(TYPESAFE_CLASSIFICATION_MODEL);
+    expect(harness.currentModel && modelKey(harness.currentModel)).toBe("anthropic/coding/model");
+    expect(harness.notices).toEqual([]);
+  });
+
+  it("leaves Automatic Routing unavailable for typesafe without a credential and never substitutes the OpenRouter Jev Client", async () => {
+    await writeConfig({ automaticRouting: true, classificationProvider: "typesafe" });
+    // If the OpenRouter Jev Client were substituted, this response would win
+    // the coding Route and the transport call count would rise.
+    const transport = vi.fn(async () =>
+      createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+
+    await runIdleRequest(harness);
+
+    expect(transport).not.toHaveBeenCalled();
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.notices).toEqual([
+      expect.objectContaining({
+        level: "warning",
+        message: "Automatic Routing could not authenticate the Classification Provider",
+      }),
+    ]);
+    expect(explanationData(harness.sessionEntries)).toEqual([
+      expect.objectContaining({
+        kind: "routing-attempt",
+        source: "automatic",
+        outcome: "fail-open",
+        failOpen: expect.objectContaining({ reason: "provider-unavailable" }),
+      }),
+    ]);
+  });
+
+  it("keeps explicit Route Overrides working while the selected typesafe client has no credential", async () => {
+    await writeConfig({ automaticRouting: true, classificationProvider: "typesafe" });
+    vi.stubGlobal("fetch", vi.fn());
+    const harness = createHarness();
+    await runIdleRequest(harness);
+    await harness.emit("agent_settled");
+
+    await harness.command("route coding");
+    await harness.emit("input", { text: "override run", source: "interactive" });
+    await harness.emit("before_agent_start", { prompt: "override run" });
+
+    expect(harness.currentModel && modelKey(harness.currentModel)).toBe("anthropic/coding/model");
+    expect(harness.thinkingLevel).toBe("high");
+  });
+
+  it("keeps the OpenRouter Jev Client and today's behavior when the field is absent", async () => {
+    await writeConfig({ automaticRouting: true });
+    const transport = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        createDecisionsResponse({ codeWork: 0.9, deepReasoning: 0.1, externalResearch: 0.1 }),
+    );
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+
+    await runIdleRequest(harness);
+
+    expect(transport).toHaveBeenCalledTimes(1);
+    const [input, init] = transport.mock.calls[0]!;
+    expect(input).toBe(OPENROUTER_DECISIONS_URL);
+    expect(JSON.parse(String(init?.body)).model).toBe(CLASSIFICATION_MODEL);
+    expect(harness.currentModel && modelKey(harness.currentModel)).toBe("anthropic/coding/model");
+  });
+
+  it("fails configuration for an unknown selection and stays inert", async () => {
+    await writeFile(
+      join(agentDir, "pi-jev-helm.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        automaticRouting: true,
+        classificationProvider: "jev-latest",
+        routes: completeRoutes,
+      }),
+    );
+    const transport = vi.fn();
+    vi.stubGlobal("fetch", transport);
+    const harness = createHarness();
+
+    await runIdleRequest(harness);
+
+    expect(transport).not.toHaveBeenCalled();
+    expect(harness.modelChanges).toEqual([]);
+    expect(harness.notices[0]).toMatchObject({ level: "error" });
+    expect(harness.notices[0]?.message).toContain(
+      "classificationProvider must be one of openrouter, typesafe",
+    );
   });
 });

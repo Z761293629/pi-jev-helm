@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_AUTOMATIC_ROUTING,
+  DEFAULT_CLASSIFICATION_PROVIDER,
   DEFAULT_CONFIDENCE_THRESHOLD,
   loadHelmConfig,
   parseHelmConfig,
@@ -26,11 +27,49 @@ describe("configuration schema version 1", () => {
       config: {
         schemaVersion: 1,
         automaticRouting: DEFAULT_AUTOMATIC_ROUTING,
+        classificationProvider: DEFAULT_CLASSIFICATION_PROVIDER,
         confidenceThreshold: DEFAULT_CONFIDENCE_THRESHOLD,
         routes: completeRoutes,
       },
     });
   });
+
+  it.each(["openrouter", "typesafe"] as const)(
+    "accepts the Classification Provider Selection %s",
+    (classificationProvider) => {
+      const result = parseHelmConfig({ schemaVersion: 1, classificationProvider, routes: completeRoutes });
+
+      expect(result).toMatchObject({ ok: true, config: { classificationProvider } });
+    },
+  );
+
+  it.each(["type-safe", "TypeSafe", "openAI", "auto", ""])(
+    "rejects the unknown Classification Provider Selection %s by naming the field and its allowed values",
+    (classificationProvider) => {
+      const result = parseHelmConfig({ schemaVersion: 1, classificationProvider, routes: completeRoutes });
+
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          `classificationProvider must be one of ${DEFAULT_CLASSIFICATION_PROVIDER}, typesafe`,
+        );
+      }
+    },
+  );
+
+  it.each([42, true, null, ["typesafe"], {}])(
+    "rejects the non-string Classification Provider Selection %s",
+    (classificationProvider) => {
+      const result = parseHelmConfig({ schemaVersion: 1, classificationProvider, routes: completeRoutes });
+
+      expect(result).toMatchObject({ ok: false });
+      if (!result.ok) {
+        expect(result.errors).toContain(
+          `classificationProvider must be one of ${DEFAULT_CLASSIFICATION_PROVIDER}, typesafe`,
+        );
+      }
+    },
+  );
 
   it.each([0, 0.75, 1])("accepts a finite confidence threshold of %s", (confidenceThreshold) => {
     const result = parseHelmConfig({

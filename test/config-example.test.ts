@@ -48,6 +48,9 @@ describe("checked-in starter configuration example", () => {
       config: {
         schemaVersion: 1,
         automaticRouting: true,
+        // The example omits the field; the default Selection is the OpenRouter
+        // Jev Client, identical to pre-0.2.0 behavior.
+        classificationProvider: "openrouter",
         confidenceThreshold: 0.75,
         routes: EXAMPLE_ROUTES,
       },
