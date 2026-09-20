@@ -36,6 +36,10 @@ _Avoid_: Official client, typesafe provider
 The user-configured choice of the Jev Client through which Task Classification is performed. A selection that cannot be honored leaves Automatic Routing unavailable; it never silently substitutes another Jev Client.
 _Avoid_: Auto provider detection, provider fallback
 
+**Session Classification Provider Override**:
+A temporary choice that supersedes the configured Classification Provider Selection for the current Helm session without changing configuration. It is discarded when the session begins anew.
+_Avoid_: Current provider, provider switch, Client configuration
+
 **Capability Signal**:
 An independent Boolean judgment in a Task Classification, paired with confidence that the judgment is correct. V1 uses `codeWork`, `deepReasoning`, and `externalResearch`.
 _Avoid_: Task type, route label

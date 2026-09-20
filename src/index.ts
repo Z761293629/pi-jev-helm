@@ -16,7 +16,7 @@ import {
   type ClassificationResult,
   type TaskClassificationV1,
 } from "./classification-provider.js";
-import { loadHelmConfig, type ClassificationProviderSelection, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
+import { loadHelmConfig, DEFAULT_CLASSIFICATION_PROVIDER, type ClassificationProviderSelection, type ConfigLoadResult, type Route, type RouteTarget, ROUTES } from "./config.js";
 import { selectRoute, type RoutingPolicyResult } from "./routing-policy.js";
 import { TypeSafeJevClient } from "./typesafe-jev-client.js";
 import {
@@ -36,7 +36,7 @@ import {
   type RoutingAttemptExplanation,
 } from "./routing-explanation.js";
 
-const HELM_COMMANDS = ["auto", "route", "why"] as const;
+const HELM_COMMANDS = ["auto", "client", "route", "why"] as const;
 const HELM_STATUS_KEY = "pi-jev-helm";
 const CHECKPOINT_ENTRY_TYPE = "pi-jev-helm-baseline-checkpoint";
 const CHECKPOINT_SCHEMA_VERSION = 1;
@@ -114,6 +114,9 @@ const helmSelectionOperation = new AsyncLocalStorage<
 interface HelmState {
   configuration: ConfigLoadResult;
   automaticRoutingOverride: boolean | undefined;
+  classificationProviderOverride: ClassificationProviderSelection | undefined;
+  /** The Jev Client snapshotted for the automatic attempt serving the current run. */
+  activeJevClient: ClassificationProviderSelection | undefined;
   pendingRouteOverride: Route | undefined;
   pendingIdleUserMessage: string | undefined;
   routingAttemptedForCurrentRun: boolean;
@@ -142,6 +145,23 @@ function initialConfiguration(): ConfigLoadResult {
 function effectiveAutomaticRouting(state: HelmState): boolean {
   if (!state.configuration.ok) return false;
   return state.automaticRoutingOverride ?? state.configuration.config.automaticRouting;
+}
+
+/** Human labels for the Jev Clients a footer can attribute a state to. */
+const JEV_CLIENT_LABELS: Record<ClassificationProviderSelection, string> = {
+  openrouter: "OpenRouter",
+  typesafe: "TypeSafe",
+};
+
+function effectiveClassificationSelection(
+  state: HelmState,
+): ClassificationProviderSelection {
+  // Callers guard on a healthy configuration; the fallback keeps the helper
+  // total for the unhealthy case where no selection is effective.
+  if (!state.configuration.ok) return DEFAULT_CLASSIFICATION_PROVIDER;
+  return (
+    state.classificationProviderOverride ?? state.configuration.config.classificationProvider
+  );
 }
 
 function formatBaselineModel(ctx: ExtensionContext): string {
@@ -199,33 +219,41 @@ function helmFooterText(ctx: ExtensionContext, state: HelmState): string {
   // Footer tokens map to glossary terms: "auto"/"off" = Automatic Routing,
   // "override <route>" = pending Route Override, "explicit" = Explicit Model
   // Override, "fail-open" = fail-open outcome, "<route> → <model>" = active
-  // Route with its Route Target.
+  // Route with its Route Target. A healthy configuration always has an
+  // effective selection, so every state carries the Jev Client's human label:
+  // the run's snapshotted Client while one is in flight, otherwise the
+  // selection that would serve the next automatic classification. The label
+  // never marks whether the selection came from configuration or a Session
+  // Classification Provider Override; "config error" stays unprefixed because
+  // an unhealthy configuration has no effective selection.
   if (!state.configuration.ok) return `${HELM_STATUS_KEY}: config error`;
+  const label = JEV_CLIENT_LABELS[state.activeJevClient ?? effectiveClassificationSelection(state)];
+  const prefixed = (text: string): string => `${HELM_STATUS_KEY}: ${label} · ${text}`;
   // Only an Explicit Model Override ends Helm's model control, so it is the
   // override the footer reports; an Explicit Thinking Override keeps the
   // Routed Run on its Route Target and stays in the routed state.
   if (state.explicitlySupersededRun !== undefined && ctx.model) {
-    return `${HELM_STATUS_KEY}: explicit ${ctx.model.provider}/${ctx.model.id}`;
+    return prefixed(`explicit ${ctx.model.provider}/${ctx.model.id}`);
   }
   if (state.pendingBaselineRestoration) {
     return state.baselineRestorationInFlight === state.pendingBaselineRestoration
-      ? `${HELM_STATUS_KEY}: restoring`
-      : `${HELM_STATUS_KEY}: restore failed`;
+      ? prefixed("restoring")
+      : prefixed("restore failed");
   }
   if (state.pendingCheckpointRecovery) {
     return state.pendingCheckpointRecovery.status === "restoration_failed"
-      ? `${HELM_STATUS_KEY}: restore failed`
-      : `${HELM_STATUS_KEY}: restoring`;
+      ? prefixed("restore failed")
+      : prefixed("restoring");
   }
-  if (state.runFailOpen) return `${HELM_STATUS_KEY}: fail-open (${state.runFailOpen})`;
+  if (state.runFailOpen) return prefixed(`fail-open (${state.runFailOpen})`);
   const run = state.activeRoutedRun ?? state.pendingRouteTargetApplication;
   if (run) {
     const target = run.helmSelectedModel;
-    return `${HELM_STATUS_KEY}: ${run.route} → ${target.provider}/${target.id}`;
+    return prefixed(`${run.route} → ${target.provider}/${target.id}`);
   }
-  if (state.classificationInFlight) return `${HELM_STATUS_KEY}: classifying`;
-  if (state.pendingRouteOverride) return `${HELM_STATUS_KEY}: override ${state.pendingRouteOverride}`;
-  return `${HELM_STATUS_KEY}: ${effectiveAutomaticRouting(state) ? "auto" : "off"}`;
+  if (state.classificationInFlight) return prefixed("classifying");
+  if (state.pendingRouteOverride) return prefixed(`override ${state.pendingRouteOverride}`);
+  return prefixed(effectiveAutomaticRouting(state) ? "auto" : "off");
 }
 
 function isInteractive(ctx: ExtensionContext): boolean {
@@ -251,6 +279,8 @@ function completions(argumentPrefix: string): Array<{ value: string; label: stri
   let candidates: string[];
   if (argumentPrefix.startsWith("auto ")) {
     candidates = ["auto on", "auto off"];
+  } else if (argumentPrefix.startsWith("client ")) {
+    candidates = ["client openrouter", "client typesafe", "client clear"];
   } else if (argumentPrefix.startsWith("route ")) {
     candidates = ROUTES.map((route) => `route ${route}`).concat("route clear");
   } else if (!argumentPrefix.includes(" ")) {
@@ -862,7 +892,13 @@ async function beginAutomaticRouting(
   state: HelmState,
 ): Promise<void> {
   if (!state.configuration.ok) return;
-  const classificationProviderSelection = state.configuration.config.classificationProvider;
+  // The Session Classification Provider Override supersedes the configured
+  // Classification Provider Selection for future attempts only; the effective
+  // selection is snapshotted here so the in-flight run stays attributable to
+  // the Jev Client actually serving it.
+  const classificationProviderSelection =
+    state.classificationProviderOverride ?? state.configuration.config.classificationProvider;
+  state.activeJevClient = classificationProviderSelection;
   const cancellationRevision = state.routeTargetApplicationRevision;
   const runId = randomUUID();
   const attempt: ExplanationAttempt = {
@@ -998,7 +1034,7 @@ function automaticClassificationDetails(
 
 function notifyInvalidUsage(ctx: ExtensionCommandContext): void {
   ctx.ui.notify(
-    "Usage: /helm | /helm auto on|off | /helm route fast|coding|reasoning|research|clear | /helm why",
+    "Usage: /helm | /helm auto on|off | /helm client openrouter|typesafe|clear | /helm route fast|coding|reasoning|research|clear | /helm why",
     "warning",
   );
 }
@@ -1009,6 +1045,68 @@ async function handleWhyCommand(ctx: ExtensionCommandContext): Promise<void> {
     explanation
       ? formatRoutingExplanation(explanation)
       : "Pi Jev Helm has no Routing Explanation recorded on the active branch.",
+    "info",
+  );
+}
+
+const CLIENT_OVERRIDE_ARGUMENTS = ["openrouter", "typesafe", "clear"] as const;
+type ClientOverrideArgument = (typeof CLIENT_OVERRIDE_ARGUMENTS)[number];
+
+async function handleClientCommand(
+  argument: ClientOverrideArgument,
+  ctx: ExtensionCommandContext,
+  state: HelmState,
+): Promise<void> {
+  if (argument === "clear") {
+    // Clear is always allowed: it may restore a configured selection whose
+    // credential is missing, so that case warns instead of rejecting (ADR 0002).
+    const hadOverride = state.classificationProviderOverride !== undefined;
+    state.classificationProviderOverride = undefined;
+    renderHelmFooter(ctx, state);
+    if (!hadOverride) {
+      ctx.ui.notify("No session Classification Provider Override", "info");
+      return;
+    }
+    if (!state.configuration.ok) {
+      ctx.ui.notify("Session Classification Provider Override cleared", "info");
+      return;
+    }
+    const configured = state.configuration.config.classificationProvider;
+    const apiKey = await ctx.modelRegistry.getApiKeyForProvider(configured);
+    if (!apiKey) {
+      ctx.ui.notify(
+        `Session Classification Provider Override cleared; the configured ${JEV_CLIENT_LABELS[configured]} Jev Client has no credential, so Automatic Routing is unavailable`,
+        "warning",
+      );
+      return;
+    }
+    ctx.ui.notify(
+      `Session Classification Provider Override cleared; Task Classification uses the configured ${JEV_CLIENT_LABELS[configured]} Jev Client`,
+      "info",
+    );
+    return;
+  }
+
+  if (!state.configuration.ok) {
+    ctx.ui.notify(configurationError(state, "select a Jev Client"), "error");
+    return;
+  }
+  // Credential lookup matches classification exactly (Pi's stored login
+  // first, the provider's environment variable as fallback). A missing
+  // credential rejects the change and preserves the effective selection.
+  const selection: ClassificationProviderSelection = argument;
+  const apiKey = await ctx.modelRegistry.getApiKeyForProvider(selection);
+  if (!apiKey) {
+    ctx.ui.notify(
+      `Cannot select the ${JEV_CLIENT_LABELS[selection]} Jev Client for this session: no ${selection} credential is available (sign in with /login or set the provider's API key environment variable)`,
+      "error",
+    );
+    return;
+  }
+  state.classificationProviderOverride = selection;
+  renderHelmFooter(ctx, state);
+  ctx.ui.notify(
+    `Task Classification will use the ${JEV_CLIENT_LABELS[selection]} Jev Client for this extension instance`,
     "info",
   );
 }
@@ -1035,6 +1133,11 @@ async function handleCommand(args: string, ctx: ExtensionCommandContext, state: 
     state.automaticRoutingOverride = enabled;
     renderHelmFooter(ctx, state);
     ctx.ui.notify(`Automatic Routing is ${enabled ? "on" : "off"} for this extension instance`, "info");
+    return;
+  }
+
+  if (tokens[0] === "client" && tokens.length === 2 && CLIENT_OVERRIDE_ARGUMENTS.includes(tokens[1] as ClientOverrideArgument)) {
+    await handleClientCommand(tokens[1] as ClientOverrideArgument, ctx, state);
     return;
   }
 
@@ -1071,6 +1174,8 @@ export default function helmExtension(pi: ExtensionAPI): void {
   const state: HelmState = {
     configuration: initialConfiguration(),
     automaticRoutingOverride: undefined,
+    classificationProviderOverride: undefined,
+    activeJevClient: undefined,
     pendingRouteOverride: undefined,
     pendingIdleUserMessage: undefined,
     routingAttemptedForCurrentRun: false,
@@ -1091,6 +1196,10 @@ export default function helmExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     state.configuration = await loadHelmConfig();
     state.automaticRoutingOverride = undefined;
+    // A Session Classification Provider Override is session-scoped: every
+    // session start (/reload, new, resume, fork) discards it.
+    state.classificationProviderOverride = undefined;
+    state.activeJevClient = undefined;
     state.pendingRouteOverride = undefined;
     state.pendingIdleUserMessage = undefined;
     state.routingAttemptedForCurrentRun = false;
@@ -1329,10 +1438,12 @@ export default function helmExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_settled", async (_event, ctx) => {
-    // The run is over: drop its fail-open marker before restoration so the
-    // footer settles on the restoring/idle/pending state instead of briefly
+    // The run is over: drop its fail-open marker and its Jev Client snapshot
+    // before restoration so the footer settles on the restoring/idle/pending
+    // state attributed to the new effective selection instead of briefly
     // re-displaying the previous result.
     state.runFailOpen = undefined;
+    state.activeJevClient = undefined;
     await finishRoutedRun(pi, state, ctx, true);
     state.explicitlySupersededRun = undefined;
     state.routingAttemptedForCurrentRun = false;
@@ -1345,6 +1456,7 @@ export default function helmExtension(pi: ExtensionAPI): void {
     state.routingAttemptedForCurrentRun = false;
     state.explicitlySupersededRun = undefined;
     state.runFailOpen = undefined;
+    state.activeJevClient = undefined;
     state.routeTargetApplicationRevision += 1;
     const pendingApplication = state.pendingRouteTargetApplication;
     state.pendingRouteTargetApplication = undefined;

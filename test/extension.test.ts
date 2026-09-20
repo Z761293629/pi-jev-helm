@@ -1574,6 +1574,7 @@ describe("Pi Jev Helm extension", () => {
 
     expect(await complete?.("")).toEqual([
       { value: "auto", label: "auto" },
+      { value: "client", label: "client" },
       { value: "route", label: "route" },
       { value: "why", label: "why" },
     ]);
