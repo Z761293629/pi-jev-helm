@@ -8,7 +8,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
-  OpenRouterJevClassificationProvider,
+  JevClassificationProvider,
+  OpenRouterJevClient,
   CAPABILITY_SIGNAL_NAMES,
   type CapabilitySignalName,
   type ClassificationProvider,
@@ -834,7 +835,9 @@ async function createClassificationProvider(
   ctx: ExtensionContext,
 ): Promise<ClassificationProvider | undefined> {
   const apiKey = await ctx.modelRegistry.getApiKeyForProvider("openrouter");
-  return apiKey ? new OpenRouterJevClassificationProvider({ apiKey }) : undefined;
+  return apiKey
+    ? new JevClassificationProvider({ client: new OpenRouterJevClient({ apiKey }) })
+    : undefined;
 }
 
 async function beginAutomaticRouting(
