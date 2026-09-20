@@ -47,7 +47,7 @@ through the repository issue forms.
 
 | Requirement | Evidence |
 | --- | --- |
-| Pi `0.85.1` or newer | Minimum certified version, pinned as the exact dev dependency and exercised by the executable Pi matrix (`npm run test:pi-matrix`). At certification time the newest stable Pi was also `0.85.1`, so certification evidence covers Pi `0.85.1`. |
+| Pi `0.85.1` or newer | Minimum certified version, pinned as the exact dev dependency and exercised by the executable Pi matrix (`npm run test:pi-matrix`). Current certification evidence covers the minimum Pi `0.85.1` and stable Pi `0.86.0`. |
 | Node.js `22.19.0` or newer (the runtime Pi itself runs on) | Declared in `package.json` `engines`; default CI runs typecheck, build, and the full deterministic suite on exactly `22.19.0` and current Node.js `24`. |
 | An OpenRouter credential, only for Automatic Routing | Supplied by Pi (`/login` or `OPENROUTER_API_KEY`), never by Helm's configuration. Not needed while Automatic Routing is off. |
 | Models you can access for each Route | Any providers Pi supports. Helm resolves Route Targets exactly against Pi's model registry — no substitution, no fallback. |
@@ -393,22 +393,22 @@ executable matrix:
   minimum-version source for the matrix.
 - **Newest version intentionally supported:** the newest stable Pi version at
   certification time, discovered by the matrix script itself
-  (`npm view @earendil-works/pi-coding-agent dist-tags.latest`). At
-  certification this is also `0.85.1`, so certification evidence currently
-  covers Pi `0.85.1`.
+  (`npm view @earendil-works/pi-coding-agent dist-tags.latest`). Current
+  certification evidence covers Pi `0.85.1` and `0.86.0`.
 - **Package contract:** per Pi package guidance,
   `@earendil-works/pi-coding-agent` is declared as a wildcard (`"*"`) peer
   dependency, so an installed Git package always uses the Pi installation
   supplied by its host. The peer range encodes no compatibility policy; the
   certification evidence above is the support statement.
-- The matrix lives in `scripts/test-pi-matrix.mjs` and runs the same
-  public-API black-box suite (`test/pi-black-box.test.ts`) against every
-  distinct version in `{minimum, newest stable}`, driving the real in-process
-  Pi SDK: extension loading, session lifecycle, model registry, session tree,
-  and footer UI seams, with scripted in-process fake providers. Rerun it when
-  a new Pi version is released; a failure means public lifecycle semantics
-  diverged and the declared support range must be narrowed (or the extension
-  adapted) rather than reaching for Pi internals.
+- The matrix lives in `scripts/test-pi-matrix.mjs` and runs typecheck, build,
+  and the complete deterministic suite against every distinct version in
+  `{minimum, newest stable}`. The suite includes the public-API black-box
+  lifecycle tests (`test/pi-black-box.test.ts`), which drive the real
+  in-process Pi SDK across extension loading, session lifecycle, model
+  registry, session tree, and footer UI seams with scripted fake providers.
+  Rerun it when a new Pi version is released; a failure means public API or
+  lifecycle semantics diverged and the declared support range must be
+  narrowed (or the extension adapted) rather than reaching for Pi internals.
 - Matrix installs are cached under `.pi-matrix/` (git-ignored);
   `PI_MATRIX_SKIP_INSTALL=1` reuses them.
 
@@ -428,8 +428,9 @@ default.
 2. **Pi compatibility matrix** — `npm run test:pi-matrix`, also run as a
    dedicated default-CI job on Node.js `24`. It discovers the newest stable
    Pi version from npm at run time, installs it plus the pinned minimum into
-   isolated directories, swaps them in one at a time, and re-runs the
-   black-box lifecycle suite against each. See [Compatibility](#compatibility).
+   isolated directories, swaps them in one at a time, and runs typecheck,
+   build, and the complete deterministic suite against each. See
+   [Compatibility](#compatibility).
 3. **Real Jev compatibility gate** —
    `OPENROUTER_API_KEY=... npm run test:real-jev-gate`. Credentialed, paid,
    probabilistic; excluded from default CI by construction and run explicitly.

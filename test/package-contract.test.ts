@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const MAIN_PACKAGE = "@earendil-works/pi-coding-agent";
+const AI_PACKAGE = "@earendil-works/pi-ai";
 
 interface PackageManifest {
   name: string;
@@ -42,14 +43,32 @@ describe("Pi Git package contract", () => {
     expect(Number.parseInt(pin!.split(".")[0]!, 10)).toBeGreaterThanOrEqual(0);
   });
 
+  it("pins matching Pi host and AI development packages", () => {
+    const pkg = loadManifest();
+    expect(pkg.devDependencies[AI_PACKAGE]).toBe(pkg.devDependencies[MAIN_PACKAGE]);
+  });
+
   it("derives the matrix minimum from the dev dependency pin, not the peer range", () => {
     // Guards the derivation source the same way the default-suite checks guard
-    // the vitest includes: the matrix must never fall back to the wildcard peer.
+    // the test commands: the matrix must never fall back to the wildcard peer.
     const script = readFileSync(
       new URL("../scripts/test-pi-matrix.mjs", import.meta.url),
       "utf8",
     );
     expect(script).toContain(".devDependencies?.[MAIN_PACKAGE]");
     expect(script).not.toContain("peerDependencies");
+  });
+
+  it("runs complete verification for every Pi matrix target", () => {
+    const script = readFileSync(
+      new URL("../scripts/test-pi-matrix.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(script).toContain('["run", "typecheck"]');
+    expect(script).toContain('["run", "build"]');
+    expect(script).toContain('["test"]');
+    expect(script).toContain("assertCompleteInstall(matrixDir, version)");
+    expect(script).toContain("SWAPPED_PACKAGES");
+    expect(script).not.toContain("vitest.pi-matrix.config");
   });
 });

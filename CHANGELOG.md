@@ -9,6 +9,22 @@ Pi Jev Helm is distributed as a Pi Git package from immutable GitHub tags (see
 commands always reference a `v*` tag; published tags are never moved or
 deleted. A defective release is superseded by a new patch tag.
 
+## [Unreleased]
+
+### Changed
+
+- Certified Pi `0.86.0` while retaining Pi `0.85.1` as the minimum supported
+  version. The Pi compatibility matrix now runs typecheck, build, and the
+  complete deterministic test suite against both the pinned minimum and the
+  newest stable Pi, and rejects incomplete or mismatched cached Pi package
+  pairs.
+
+### Upgrade and migration notes
+
+- No configuration or workflow changes are required. Pi Jev Helm continues to
+  use the OpenRouter Decisions API for Jev Task Classification; no Pi `0.86.0`
+  runtime API migration was needed.
+
 ## [0.1.0] — Public Preview (2026-09-19)
 
 First externally installable release. Pre-stable by definition: support is
@@ -73,4 +89,5 @@ best-effort, and the next minor version may change the contract.
   patch tag, never by moving an existing one; see the
   [tag policy](docs/tag-policy.md).
 
+[Unreleased]: https://github.com/Z761293629/pi-jev-helm/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Z761293629/pi-jev-helm/releases/tag/v0.1.0

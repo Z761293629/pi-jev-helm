@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Executable Pi compatibility matrix for Pi Jev Helm.
 //
-// Certifies the public-API black-box suite (test/pi-black-box.test.ts) against:
+// Certifies type safety, build output, and the complete deterministic suite against:
 //   - the minimum supported Pi version (MINIMUM_PI_VERSION), taken from the
 //     exact @earendil-works/pi-coding-agent dev dependency pin — the single
 //     source of the matrix minimum (the host-facing peer dependency is a
@@ -13,9 +13,10 @@
 //
 // For every distinct target version the script installs that version into an
 // isolated directory, temporarily points the repository's @earendil-works
-// installations at it (symlinks, always restored), and runs the black-box
-// suite so the extension, the Pi SDK, and the fake providers all resolve to
-// the version under certification. No Pi internals are involved anywhere.
+// installations at it (symlinks, always restored), then runs typecheck, build,
+// and the full deterministic suite so the extension, the Pi SDK, and the fake
+// providers all resolve to the version under certification. No Pi internals
+// are involved anywhere.
 //
 // Usage:
 //   npm run test:pi-matrix
@@ -64,10 +65,32 @@ function removePath(path) {
   }
 }
 
+function hasCompleteInstall(matrixDir, version) {
+  try {
+    return SWAPPED_PACKAGES.every(
+      (packageName) => installedVersion(matrixDir, packageName) === version,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function assertCompleteInstall(matrixDir, version) {
+  for (const packageName of SWAPPED_PACKAGES) {
+    const packagePath = join(matrixDir, "node_modules", packageName, "package.json");
+    if (!existsSync(packagePath)) {
+      throw new Error(`matrix installation is missing ${packageName}: ${matrixDir}`);
+    }
+    const actual = installedVersion(matrixDir, packageName);
+    if (actual !== version) {
+      throw new Error(`${packageName} resolved to ${actual}, expected ${version}`);
+    }
+  }
+}
+
 function ensureInstall(matrixDir, version) {
-  const installedMarker = join(matrixDir, "node_modules", MAIN_PACKAGE);
-  if (existsSync(installedMarker)) {
-    if (installedVersion(matrixDir) === version) return;
+  if (existsSync(matrixDir)) {
+    if (hasCompleteInstall(matrixDir, version)) return;
     rmSync(matrixDir, { recursive: true, force: true });
   }
   mkdirSync(matrixDir, { recursive: true });
@@ -93,12 +116,7 @@ function ensureInstall(matrixDir, version) {
     ],
     { stdio: "inherit" },
   );
-  for (const packageName of SWAPPED_PACKAGES) {
-    const actual = installedVersion(matrixDir, packageName);
-    if (actual !== version) {
-      throw new Error(`${packageName} resolved to ${actual}, expected ${version}`);
-    }
-  }
+  assertCompleteInstall(matrixDir, version);
 }
 
 /**
@@ -156,16 +174,28 @@ function swapIn(matrixDir) {
   return restore;
 }
 
-function runVitest() {
-  try {
-    execFileSync("npx", ["vitest", "run", "--config", "vitest.pi-matrix.config.ts"], {
-      cwd: REPO_ROOT,
-      stdio: "inherit",
-    });
-    return 0;
-  } catch (error) {
-    return typeof error.status === "number" ? error.status : 1;
+const VERIFICATION_STEPS = [
+  { name: "typecheck", command: "npm", args: ["run", "typecheck"] },
+  { name: "build", command: "npm", args: ["run", "build"] },
+  { name: "test", command: "npm", args: ["test"] },
+];
+
+function runVerification(version) {
+  const steps = [];
+  for (const step of VERIFICATION_STEPS) {
+    console.log(`\n[pi-matrix] Pi ${version}: ${step.name}`);
+    let exitCode = 0;
+    try {
+      execFileSync(step.command, step.args, {
+        cwd: REPO_ROOT,
+        stdio: "inherit",
+      });
+    } catch (error) {
+      exitCode = typeof error.status === "number" ? error.status : 1;
+    }
+    steps.push({ name: step.name, exitCode });
   }
+  return steps;
 }
 
 async function main() {
@@ -178,22 +208,26 @@ async function main() {
     `[pi-matrix] minimum ${MINIMUM_PI_VERSION}; newest stable ${newest}; matrix jobs: ${versions.join(", ")}`,
   );
 
+  const targets = versions.map((version) => ({
+    version,
+    matrixDir: join(MATRIX_DIR, version),
+  }));
+  for (const { version, matrixDir } of targets) {
+    if (process.env.PI_MATRIX_SKIP_INSTALL === "1") {
+      assertCompleteInstall(matrixDir, version);
+    } else {
+      ensureInstall(matrixDir, version);
+    }
+  }
+
   const results = [];
   try {
-    for (const version of versions) {
-      const matrixDir = join(MATRIX_DIR, version);
-      if (process.env.PI_MATRIX_SKIP_INSTALL === "1") {
-        if (!existsSync(join(matrixDir, "node_modules", MAIN_PACKAGE))) {
-          throw new Error(`PI_MATRIX_SKIP_INSTALL=1 but ${matrixDir} has no installation`);
-        }
-      } else {
-        ensureInstall(matrixDir, version);
-      }
-      console.log(`\n[pi-matrix] black-box suite against Pi ${version}`);
+    for (const { version, matrixDir } of targets) {
+      console.log(`\n[pi-matrix] full verification against Pi ${version}`);
       const restore = swapIn(matrixDir);
       try {
-        const exitCode = runVitest();
-        results.push({ version, exitCode });
+        const steps = runVerification(version);
+        results.push({ version, steps });
       } finally {
         restore();
         armedRestore = undefined;
@@ -206,16 +240,21 @@ async function main() {
 
   console.log("\nPi compatibility matrix");
   console.log("=======================");
-  for (const { version, exitCode } of results) {
-    console.log(`  Pi ${version}: ${exitCode === 0 ? "PASS" : "FAIL"}`);
+  for (const { version, steps } of results) {
+    const summary = steps
+      .map(({ name, exitCode }) => `${name}=${exitCode === 0 ? "PASS" : "FAIL"}`)
+      .join(", ");
+    console.log(`  Pi ${version}: ${summary}`);
   }
-  const failed = results.some((result) => result.exitCode !== 0);
+  const failed = results.some((result) =>
+    result.steps.some((step) => step.exitCode !== 0),
+  );
   if (failed) {
     console.error("\n[pi-matrix] compatibility matrix FAILED");
     process.exit(1);
   }
   console.log(
-    `[pi-matrix] certified: black-box lifecycle suite passes on Pi ${results
+    `[pi-matrix] certified: typecheck, build, and full deterministic suite pass on Pi ${results
       .map((result) => result.version)
       .join(" and ")}`,
   );
