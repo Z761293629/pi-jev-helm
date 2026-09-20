@@ -896,8 +896,7 @@ async function beginAutomaticRouting(
   // Classification Provider Selection for future attempts only; the effective
   // selection is snapshotted here so the in-flight run stays attributable to
   // the Jev Client actually serving it.
-  const classificationProviderSelection =
-    state.classificationProviderOverride ?? state.configuration.config.classificationProvider;
+  const classificationProviderSelection = effectiveClassificationSelection(state);
   state.activeJevClient = classificationProviderSelection;
   const cancellationRevision = state.routeTargetApplicationRevision;
   const runId = randomUUID();

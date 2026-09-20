@@ -3,11 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { restoreAgentDirectory,
+import {
   createDecisionsResponse,
   createTypeSafeDecisionsResponse,
   deferred,
-  explanationData } from "./fixtures.js";
+  explanationData,
+  restoreAgentDirectory,
+} from "./fixtures.js";
 import { createHarness, modelKey, writeHelmConfig } from "./harness.js";
 import {
   TYPESAFE_API_BASE_URL,
@@ -35,6 +37,35 @@ function lastStatus(harness: ReturnType<typeof createHarness>): { key: string; t
   const status = harness.statuses.at(-1);
   if (!status) throw new Error("Helm did not render a footer status");
   return status;
+}
+
+/** Wraps the harness registry's credential lookup to record every provider queried. */
+function trackCredentialLookups(
+  harness: ReturnType<typeof createHarness>,
+  getApiKeyCalls: string[],
+): void {
+  const registry = (
+    harness.context as unknown as {
+      modelRegistry: { getApiKeyForProvider: (p: string) => Promise<string | undefined> };
+    }
+  ).modelRegistry;
+  const original = registry.getApiKeyForProvider.bind(registry);
+  registry.getApiKeyForProvider = async (provider: string) => {
+    getApiKeyCalls.push(provider);
+    return original(provider);
+  };
+}
+
+/** Replaces the harness registry's credential lookup from this point on. */
+function stubCredentialLookup(
+  harness: ReturnType<typeof createHarness>,
+  lookup: (provider: string) => string | undefined,
+): void {
+  (
+    harness.context as unknown as {
+      modelRegistry: { getApiKeyForProvider: (p: string) => Promise<string | undefined> };
+    }
+  ).modelRegistry.getApiKeyForProvider = async (provider: string) => lookup(provider);
 }
 
 describe("Session Classification Provider Override command grammar", () => {
@@ -130,14 +161,7 @@ describe("Setting the Session Classification Provider Override", () => {
     const harness = createHarness("tui", {
       apiKeysByProvider: { openrouter: "key-openrouter", typesafe: "key-typesafe" },
     });
-    const registry = (
-      (harness.context as unknown as { modelRegistry: { getApiKeyForProvider: (p: string) => Promise<string | undefined> } }).modelRegistry
-    );
-    const original = registry.getApiKeyForProvider.bind(registry);
-    registry.getApiKeyForProvider = async (provider: string) => {
-      getApiKeyCalls.push(provider);
-      return original(provider);
-    };
+    trackCredentialLookups(harness, getApiKeyCalls);
 
     await harness.emit("session_start", { reason: "startup" });
     await harness.command("client typesafe");
@@ -172,13 +196,9 @@ describe("Clearing the Session Classification Provider Override", () => {
 
     // Simulate the configured credential disappearing while the override is
     // active: clear must still succeed and warn about the restored selection.
-    const registry = (
-      harness.context as unknown as {
-        modelRegistry: { getApiKeyForProvider: (p: string) => Promise<string | undefined> };
-      }
-    ).modelRegistry;
-    registry.getApiKeyForProvider = async (provider: string) =>
-      provider === "openrouter" ? "key-openrouter" : undefined;
+    stubCredentialLookup(harness, (provider) =>
+      provider === "openrouter" ? "key-openrouter" : undefined,
+    );
 
     await harness.command("client clear");
     expect(harness.notices.at(-1)).toMatchObject({ level: "warning" });
@@ -236,6 +256,23 @@ describe("Session Classification Provider Override lifecycle", () => {
       expect(lastStatus(harness).text).toBe("pi-jev-helm: OpenRouter · off");
     },
   );
+
+  it("does not preserve the override across exit and the next session", async () => {
+    await writeConfig({ automaticRouting: false });
+    const harness = createHarness("tui", {
+      apiKeysByProvider: { openrouter: "key-openrouter", typesafe: "key-typesafe" },
+    });
+    await harness.emit("session_start", { reason: "startup" });
+    await harness.command("client typesafe");
+    expect(lastStatus(harness).text).toBe("pi-jev-helm: TypeSafe · off");
+
+    await harness.emit("session_shutdown");
+    // Exiting never rewrites the configuration: the override is gone because
+    // session state dies with the session, and the next session start finds
+    // only the configured selection.
+    await harness.emit("session_start", { reason: "resume" });
+    expect(lastStatus(harness).text).toBe("pi-jev-helm: OpenRouter · off");
+  });
 
   it("never writes the configuration file or appends session records", async () => {
     await writeConfig({ automaticRouting: false, classificationProvider: "openrouter" });
@@ -378,13 +415,9 @@ describe("Session Classification Provider Override attribution", () => {
     await harness.command("client typesafe");
     expect(harness.notices.at(-1)).toMatchObject({ level: "info" });
     // The credential disappears after the override was accepted.
-    const registry = (
-      harness.context as unknown as {
-        modelRegistry: { getApiKeyForProvider: (p: string) => Promise<string | undefined> };
-      }
-    ).modelRegistry;
-    registry.getApiKeyForProvider = async (provider: string) =>
-      provider === "openrouter" ? "key-openrouter" : undefined;
+    stubCredentialLookup(harness, (provider) =>
+      provider === "openrouter" ? "key-openrouter" : undefined,
+    );
 
     await runIdleRequest(harness);
 
