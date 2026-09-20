@@ -7,8 +7,10 @@
 const RULES = [
   {
     tag: 'api-key',
-    // OpenAI sk-…, OpenRouter or-…, TypeSafe ts-…, generic key-ish prefixes
-    re: /\b(?:sk|or|ts|rk|pk|ghp|gho|github_pat|xoxb|xoxp|AIza)[A-Za-z0-9_\-]{16,}\b/g,
+    // OpenAI sk-…, OpenRouter or-v1-…, TypeSafe ts-…, GitHub/xox/AIza…
+    // prefixes must be followed by a hyphen (or be ghp/xox/AIza-style) so that
+    // ordinary words like "organization…" or "skill…" never match.
+    re: /(?<![A-Za-z0-9_\-])(?:sk|or|ts|rk|pk)-v?\d*-?[A-Za-z0-9_\-]{16,}|\b(?:ghp|gho|github_pat|xoxb|xoxp|AIza)[A-Za-z0-9_\-]{16,}\b/g,
   },
   {
     tag: 'bearer',

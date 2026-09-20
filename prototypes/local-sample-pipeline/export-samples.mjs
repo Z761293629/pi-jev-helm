@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import readline from 'node:readline';
 import { sanitize, projectLabel } from './sanitize.mjs';
 
 const args = process.argv.slice(2);
@@ -64,10 +65,12 @@ function extractRuns(file) {
   let pendingRouting = null;
   let sawUser = false;
   let currentUser = null;
+  let userMsgCount = 0;
   let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
   const push = () => {
     if (!currentUser) return;
+    currentUser.sessionUserMsgs = userMsgCount;
     out.push({ ...currentUser, usage: { ...usage } });
     currentUser = null;
   };
@@ -86,6 +89,7 @@ function extractRuns(file) {
         push(); // close previous run's usage accumulation
         usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
         const opener = !sawUser || pendingRouting != null;
+        userMsgCount += 1;
         currentUser = {
           sessionFile: path.basename(file),
           sessionId: session.id || null,
@@ -95,6 +99,7 @@ function extractRuns(file) {
           routing: opener ? pendingRouting : null,
           rawText: texts.join('\n'),
           hadNonTextParts: (m.content || []).some((p) => p.type !== 'text'),
+          sessionUserMsgs: 0, // filled at push()
         };
         sawUser = true;
         pendingRouting = null;
@@ -117,6 +122,9 @@ function extractRuns(file) {
 
 // Heuristic: does this request seem to depend on prior conversation context?
 const CONTEXT_HINT = /(继续|接着|接下来|再试|还是|上面|前面|之前|刚才|那个文件|同一个|这张图|continue|go on|as before|same as|last time|prior session)/i;
+
+// Heuristic: machine-probe / health-check noise, not representative real usage.
+const PROBE = /(MACHINE_OK|PING_OK|HEALTH_OK|\bping\b|^\s*ok\s*$|^\s*test\s*$)/i;
 
 function reviewSheet(candidates) {
   const blocks = candidates.map((c) => {
@@ -182,6 +190,8 @@ function cmdExport(files) {
           cjkRatio: +cjk.toFixed(2),
           hadNonTextParts: run.hadNonTextParts,
           contextHint: CONTEXT_HINT.test(run.rawText.slice(0, 120)),
+          probe: PROBE.test(run.rawText) || run.rawText.trim().length < 12,
+          sessionUserMsgs: run.sessionUserMsgs,
           usage: run.usage,
         },
         redactions,
@@ -246,9 +256,73 @@ function cmdStats() {
   console.log('redacted:', all.filter((c) => c.redactions.length).length, ' flagged:', all.filter((c) => c.residual.length).length);
 }
 
+function cmdSheet(ids) {
+  assertOutsideGitWorkTree(poolDir);
+  const candidates = ids.map((id) =>
+    JSON.parse(fs.readFileSync(path.join(poolDir, 'pool', `${id}.json`), 'utf8')));
+  fs.writeFileSync(path.join(poolDir, 'review-pending.md'), reviewSheet(candidates));
+  console.log(`review-pending.md rebuilt for ${candidates.length} candidates → ${poolDir}`);
+}
+
+function cmdDumpMeta() {
+  assertOutsideGitWorkTree(poolDir);
+  const dir = path.join(poolDir, 'pool');
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.json'))) {
+    const c = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    console.log(JSON.stringify({
+      id: c.id, status: c.status, kind: c.meta.kind, project: c.meta.project,
+      route: c.meta.route, outcome: c.meta.outcome, signals: c.meta.signals,
+      chars: c.meta.chars, cjkRatio: c.meta.cjkRatio, contextHint: c.meta.contextHint,
+      probe: c.meta.probe, sessionUserMsgs: c.meta.sessionUserMsgs,
+      turns: c.meta.usage.turns, cost: +c.meta.usage.cost.toFixed(5),
+      redacted: c.redactions.length > 0, flagged: c.residual.length > 0,
+      timestamp: c.meta.timestamp,
+    }));
+  }
+}
+
+function cmdReview() {
+  assertOutsideGitWorkTree(poolDir);
+  const dir = path.join(poolDir, 'pool');
+  const manifestPath = path.join(poolDir, 'screening-manifest.json');
+  const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, 'utf8')) : null;
+  const order = manifest ? manifest.samples.map((s) => s.id) : null;
+  let all = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+  if (order) {
+    const idx = new Map(order.map((id, i) => [id, i]));
+    all = all.filter((c) => idx.has(c.id)).sort((a, b) => idx.get(a.id) - idx.get(b.id));
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q) => new Promise((res) => rl.question(q, res));
+  (async () => {
+    let done = 0;
+    for (const c of all) {
+      if (c.status !== 'pending') { done++; continue; }
+      console.log(`\n=== ${c.id} [${c.meta.kind}] project=${c.meta.project} route=${c.meta.route ?? 'n/a'} outcome=${c.meta.outcome ?? 'n/a'}`);
+      if (c.meta.contextHint) console.log('⚠ 上下文指代词 — 建议 capsule');
+      console.log(`redactions: ${c.redactions.map((x) => `${x.tag}×${x.count}`).join(', ') || 'none'} | residual: ${c.residual.join(', ') || 'none'}`);
+      console.log('---');
+      console.log(c.text.slice(0, 600) + (c.text.length > 600 ? ` …[+${c.text.length - 600} chars]` : ''));
+      const a = (await ask('approve? [y / n / c=capsule / s=skip] ')).trim();
+      if (a === 'y') { c.status = 'approved'; c.standalone = true; }
+      else if (a === 'n') { fs.rmSync(path.join(dir, `${c.id}.json`)); console.log('rejected (deleted)'); continue; }
+      else if (a === 'c') { const cap = await ask('capsule (一句话任务背景): '); c.status = 'approved'; c.standalone = false; c.capsule = sanitize(cap).text; }
+      else continue;
+      fs.writeFileSync(path.join(dir, `${c.id}.json`), JSON.stringify(c, null, 2));
+      done++;
+    }
+    rl.close();
+    console.log(`\nreviewed ${done}/${all.length}`);
+  })();
+}
+
 switch (mode) {
   case '--list': cmdList(args[1]); break;
   case '--export': cmdExport(args.slice(1)); break;
+  case '--sheet': cmdSheet(args.slice(1)); break;
+  case '--dump-meta': cmdDumpMeta(); break;
+  case '--review': cmdReview(); break;
   case '--confirm': {
     const i = args.indexOf('--capsule');
     const capsule = i === -1 ? null : args[i + 1];
@@ -258,5 +332,5 @@ switch (mode) {
   case '--reject': cmdReject(args[1]); break;
   case '--stats': cmdStats(); break;
   default:
-    console.log('modes: --list <dir> | --export <file...> | --confirm <id> | --reject <id> | --stats');
+    console.log('modes: --list <dir> | --export <file...> | --sheet <id...> | --dump-meta | --review | --confirm <id> [--capsule "..."] | --reject <id> | --stats');
 }
