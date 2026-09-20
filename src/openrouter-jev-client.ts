@@ -1,4 +1,7 @@
-import { isObject,
+import {
+  isObject,
+  safeFailureMetadata,
+  type FetchTransport,
   type JevClient,
   type JevClientRequest,
   type JevClientRequestOptions,
@@ -8,64 +11,9 @@ import { isObject,
 export const OPENROUTER_DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions";
 export const CLASSIFICATION_MODEL = "typesafe/jev-1.13";
 
-export type FetchTransport = (
-  input: string | URL | Request,
-  init?: RequestInit,
-) => Promise<Response>;
-
 export interface OpenRouterJevClientOptions {
   apiKey: string;
   fetch?: FetchTransport;
-}
-
-function exposesSensitiveValue(
-  candidate: string,
-  sensitiveValues: readonly string[],
-): boolean {
-  return sensitiveValues.some((sensitiveValue) =>
-    sensitiveValue.length > 0 &&
-    (candidate.includes(sensitiveValue) ||
-      (candidate.length >= 8 && sensitiveValue.includes(candidate))),
-  );
-}
-
-function safeUpstreamCode(
-  value: unknown,
-  sensitiveValues: readonly string[],
-): string | number | undefined {
-  if (!isObject(value) || !isObject(value.error)) return undefined;
-  const code = value.error.code;
-  if (
-    typeof code === "string" &&
-    /^[A-Za-z0-9._:-]{1,128}$/.test(code) &&
-    !exposesSensitiveValue(code, sensitiveValues)
-  ) {
-    return code;
-  }
-  return typeof code === "number" &&
-    Number.isSafeInteger(code) &&
-    !exposesSensitiveValue(String(code), sensitiveValues)
-    ? code
-    : undefined;
-}
-
-function safeRetryAfterMs(headers: Headers): number | undefined {
-  const value = headers.get("retry-after");
-  if (value === null || !/^\d+$/.test(value.trim())) return undefined;
-  const milliseconds = Number(value.trim()) * 1000;
-  return Number.isSafeInteger(milliseconds) ? milliseconds : undefined;
-}
-
-function safeRequestId(
-  headers: Headers,
-  sensitiveValues: readonly string[],
-): string | undefined {
-  const value = headers.get("x-request-id");
-  return value &&
-    /^[A-Za-z0-9._:-]{1,256}$/.test(value) &&
-    !exposesSensitiveValue(value, sensitiveValues)
-    ? value
-    : undefined;
 }
 
 function parseJson(text: string): unknown | undefined {
@@ -129,16 +77,11 @@ export class OpenRouterJevClient implements JevClient {
     }
 
     const sensitiveValues = [this.apiKey, request.state];
-    const upstreamCode = safeUpstreamCode(envelope, sensitiveValues);
-    const retryAfterMs = safeRetryAfterMs(response.headers);
-    const requestId = safeRequestId(response.headers, sensitiveValues);
     return {
       ok: false,
       status: response.status,
       envelope,
-      ...(upstreamCode === undefined ? {} : { upstreamCode }),
-      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-      ...(requestId === undefined ? {} : { requestId }),
+      ...safeFailureMetadata(envelope, response.headers, sensitiveValues, "x-request-id"),
     };
   }
 }

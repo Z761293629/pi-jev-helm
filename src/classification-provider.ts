@@ -1,12 +1,17 @@
-import { isObject, type JevClient } from "./jev-client.js";
+import {
+  isObject,
+  DEFAULT_CLASSIFICATION_TIMEOUT_MS,
+  JevClientTransportError,
+  type FetchTransport,
+  type JevClient,
+} from "./jev-client.js";
 import {
   CLASSIFICATION_MODEL,
   OPENROUTER_DECISIONS_URL,
   OpenRouterJevClient,
-  type FetchTransport,
 } from "./openrouter-jev-client.js";
 
-export { type JevClient } from "./jev-client.js";
+export { type JevClient, DEFAULT_CLASSIFICATION_TIMEOUT_MS } from "./jev-client.js";
 export {
   CLASSIFICATION_MODEL,
   OPENROUTER_DECISIONS_URL,
@@ -14,7 +19,6 @@ export {
 } from "./openrouter-jev-client.js";
 
 export const CLASSIFICATION_TEMPLATE_VERSION = "classification-v1";
-export const DEFAULT_CLASSIFICATION_TIMEOUT_MS = 2500;
 
 export const CLASSIFICATION_TEMPLATE_V1 = {
   codeWork: {
@@ -186,6 +190,7 @@ function isAbortFailure(error: unknown): boolean {
 }
 
 function isNetworkFailure(error: unknown): boolean {
+  if (error instanceof JevClientTransportError) return true;
   if (error instanceof TypeError) return true;
   if (!isObject(error)) return false;
   const code = error.code ?? (isObject(error.cause) ? error.cause.code : undefined);
