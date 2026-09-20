@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // Executable contract for the Release Gate workflow
-// (.github/workflows/release.yml) and its two scripts. The release gate is
+// (.github/workflows/release.yml) and its scripts. The release gate is
 // the automation that stands between a maintainer's `v*` tag push and the
 // public GitHub Pre-release, so this file guards its non-negotiable
 // properties the same way test/ci-contract.test.ts guards default CI:
@@ -119,46 +119,82 @@ describe("release gate verification", () => {
     expect(piCompatibility).toContain("npm run test:pi-matrix");
   });
 
-  it("runs the credentialed real Jev gate and fails explicitly without the key", () => {
+  it("runs the credentialed real Jev gate and fails explicitly without either key", () => {
     const realJev = jobSection(loadWorkflow(), "real-jev-gate");
     expect(realJev).toContain("npm run test:real-jev-gate");
-    // Missing credentials must fail the gate, never skip it.
+    // The Release Gate certifies both Jev Client legs, so it requires both
+    // credentials. A missing or blank credential must fail the gate, never
+    // skip its leg.
     expect(realJev).toContain("OPENROUTER_API_KEY");
-    expect(realJev).toContain("exit 1");
-    expect(realJev).toContain("-z");
+    expect(realJev).toContain("TYPESAFE_API_KEY");
+    expect(realJev).toContain("node scripts/require-release-credentials.mjs");
+    // The guard names both secrets and fails loudly.
+    const guard = loadScript("require-release-credentials.mjs");
+    expect(guard).toContain('"OPENROUTER_API_KEY"');
+    expect(guard).toContain('"TYPESAFE_API_KEY"');
+    expect(guard).toContain("::error::");
+    expect(guard).toContain("process.exit(1)");
+  });
+
+  it("checks both credentials before dependency installation and the paid gate", () => {
+    const realJev = jobSection(loadWorkflow(), "real-jev-gate");
+    const npmCiIndex = realJev.indexOf("- run: npm ci");
+    expect(npmCiIndex).toBeGreaterThan(-1);
+    // The guard step sits ahead of `npm ci`, so a missing or blank secret
+    // fails the release before dependencies are installed and before the
+    // paid gate itself is attempted.
+    const guardIndex = realJev.indexOf("node scripts/require-release-credentials.mjs");
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(npmCiIndex);
+  });
+
+  it("treats a credential as blank exactly when the gate's own resolution would", () => {
+    // Same rule as src/real-jev-gate.ts: unset, empty, or whitespace only.
+    // A guard looser than the gate could pass here and then skip a leg
+    // anyway; a guard stricter could fail a release the gate would certify.
+    const guard = loadScript("require-release-credentials.mjs");
+    expect(guard).toContain("trim().length === 0");
   });
 });
 
-describe("OpenRouter credential isolation", () => {
-  it("injects the credential only into the real Jev gate job", () => {
+describe("real Jev gate credential isolation", () => {
+  it("injects both credentials only into the real Jev gate job", () => {
     const workflow = loadWorkflow();
     const secretReferences = workflow.match(/secrets\.\w+/g) ?? [];
     expect(secretReferences.length).toBeGreaterThan(0);
-    // Every secret read in the workflow is the OpenRouter key, and every
-    // read happens inside the real Jev gate job.
-    expect(new Set(secretReferences)).toEqual(new Set(["secrets.OPENROUTER_API_KEY"]));
+    // Every secret read in the workflow is one of the two Jev Client keys,
+    // and every read happens inside the real Jev gate job.
+    expect(new Set(secretReferences)).toEqual(
+      new Set(["secrets.OPENROUTER_API_KEY", "secrets.TYPESAFE_API_KEY"]),
+    );
     const realJev = jobSection(workflow, "real-jev-gate");
     for (const reference of secretReferences) {
       expect(realJev).toContain(reference);
     }
   });
 
-  it("never caches, archives, or echoes the credential", () => {
+  it("never caches, archives, or echoes either credential", () => {
     const workflow = loadWorkflow();
     // No caching or artifact upload anywhere in the release workflow, so
-    // nothing a step produces can outlive the run with the credential in it.
+    // nothing a step produces can outlive the run with a credential in it.
     expect(workflow).not.toContain("actions/cache");
     expect(workflow).not.toContain("actions/upload-artifact");
     expect(workflow).not.toContain("continue-on-error");
     // The real Jev gate job itself uses no npm cache either.
     const realJev = jobSection(workflow, "real-jev-gate");
     expect(realJev).not.toContain("cache: npm");
-    // The key is consumed as an environment variable, not as command output:
-    // its only shell-level reference is the defined-or-empty guard, which
-    // tests presence without ever printing the value.
-    expect(realJev.match(/\$\{?OPENROUTER_API_KEY/g)).toEqual(["${OPENROUTER_API_KEY"]);
-    expect(realJev).toContain('"${OPENROUTER_API_KEY:-}"');
+    // Each key name appears in the job only in its env mapping (the mapping
+    // name plus the secret reference), never as command output or shell
+    // expansion.
+    expect(realJev.match(/OPENROUTER_API_KEY/g)).toEqual(["OPENROUTER_API_KEY", "OPENROUTER_API_KEY"]);
+    expect(realJev.match(/TYPESAFE_API_KEY/g)).toEqual(["TYPESAFE_API_KEY", "TYPESAFE_API_KEY"]);
     expect(realJev).not.toContain("printenv");
+    // The guard reads each credential exactly once, to test presence; the
+    // value never reaches any output or storage call.
+    const guard = loadScript("require-release-credentials.mjs");
+    expect(guard.match(/process\.env/g)).toEqual(["process.env"]);
+    expect(guard).not.toContain("console.log");
+    expect(guard).not.toContain("writeFile");
   });
 });
 

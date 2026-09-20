@@ -87,27 +87,28 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-    # The credential exists only in this job's environment. It is never
+    # The credentials exist only in this job's environment. They are never
     # echoed, never written to a file, and this job uses no npm cache and no
     # artifact steps, so nothing it produces can outlive the run. GitHub
-    # additionally masks the secret value in any log output.
+    # additionally masks the secret values in any log output.
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      # The gate must run, not skip: a missing credential fails the release
-      # explicitly before any other step. The message never contains the
-      # key itself.
-      - name: Require the OpenRouter credential
-        run: |
-          if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-            echo "::error::OPENROUTER_API_KEY is not configured. The real Jev Gate is a mandatory, unskippable Release Gate: configure the repository Actions Secret named OPENROUTER_API_KEY, then re-run this workflow. No Release was created."
-            exit 1
-          fi
+      # Both legs must run, not skip: the gate is mandatory and unskippable,
+      # so both credentials are checked here — before dependency installation
+      # and before any paid request the gate itself performs. The guard
+      # fails naming every missing or blank secret and never prints a value.
+      - name: Require both Jev Client credentials
+        run: node scripts/require-release-credentials.mjs
       - run: npm ci
+      # Both credentials are present (enforced above), so the gate runs both
+      # 24-message legs: a successful run certifies all 48 corpus tests with
+      # no skipped leg. A failing leg fails this job and prevents the release.
       - run: npm run test:real-jev-gate
 
   install-smoke-test:

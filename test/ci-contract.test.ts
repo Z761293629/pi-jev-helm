@@ -65,9 +65,10 @@ describe("default CI contract", () => {
     expect(deterministic).not.toContain("vitest.pi-matrix.config");
   });
 
-  it("configures no credentials and never references the OpenRouter key", () => {
+  it("configures no credentials and never references either Jev Client key", () => {
     const workflow = loadWorkflow();
     expect(workflow).not.toContain("OPENROUTER_API_KEY");
+    expect(workflow).not.toContain("TYPESAFE_API_KEY");
     // No GitHub secret is read anywhere in the workflow, so the default suite
     // cannot depend on external credentials even accidentally.
     expect(workflow).not.toContain("${{ secrets.");
