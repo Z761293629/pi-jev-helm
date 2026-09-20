@@ -47,6 +47,16 @@ async function interruptCodingRouteTarget(): Promise<FakeSessionEntry[]> {
 }
 
 describe("Pi Jev Helm extension", () => {
+  it("registers an auth-only TypeSafe credential entry", () => {
+    const harness = createHarness();
+
+    expect(harness.providerRegistrations.get("typesafe")).toEqual({
+      name: "TypeSafe",
+      apiKey: "$TYPESAFE_API_KEY",
+      models: [],
+    });
+  });
+
   it("loads configuration on startup and reload and reports health through /helm", async () => {
     await writeConfig({ automaticRouting: false });
     const harness = createHarness();

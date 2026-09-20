@@ -33,6 +33,7 @@ import {
   DefaultResourceLoader,
   type AgentSessionEvent,
   type ExtensionUIContext,
+  ModelRegistry,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -364,6 +365,7 @@ export interface HelmHarness {
   routes: Record<HelmRouteName, ScriptedProvider>;
   user: ScriptedProvider;
   modelRuntime: ModelRuntime;
+  modelRegistry: ModelRegistry;
   agentDir: string;
   sessionFile: string | undefined;
   /** Toggle Classification Provider credential availability (public auth effects only). */
@@ -449,6 +451,7 @@ async function buildHarness(
     modelsPath: null,
     refreshOnCreate: false,
   });
+  const modelRegistry = new ModelRegistry(modelRuntime);
 
   const baseline = createScriptedProvider(BASELINE_PROVIDER, [BASELINE_MODEL_ID], {
     ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
@@ -642,6 +645,7 @@ async function buildHarness(
     routes: routeProviders,
     user,
     modelRuntime,
+    modelRegistry,
     agentDir,
     sessionFile: firstManagerRef.getSessionFile(),
     setOpenRouterConfigured,
