@@ -144,7 +144,7 @@
   <div class="eyebrow">Throwaway logic prototype</div>
   <h1>路由评测协议模拟器</h1>
   <p class="intro">
-    这个原型回答一个问题：候选路由能否在质量零退化的硬底线下，
+    这个原型回答一个问题：候选路由能否在没有检测到统计显著质量退化的前提下，
     把包含 Prompt Cache、分类和模型调用的平均总费用至少降低 20%？
   </p>
   <div class="warning">原型，不是生产实现。双击本文件即可运行；所有状态只存在内存中。</div>
@@ -163,11 +163,11 @@
       <h2>协议草案</h2>
       <div class="protocol">
         <div class="protocol-item"><div><strong>双成本基线</strong><br>候选同时与当前 Helm、始终强模型比较；每条任务轨迹固定后配对运行。</div></div>
-        <div class="protocol-item"><div><strong>质量硬底线</strong><br>完整任务 A/B 盲评；候选胜率的 95% Wilson 区间下界必须达到 50%，不能只靠“没有发现退化”。</div></div>
+        <div class="protocol-item"><div><strong>质量非退化</strong><br>完整任务 A/B 盲评；只有当候选胜率的 95% Wilson 区间上界低于 50% 时才判定退化。区间仍包含 50% 就允许通过。</div></div>
         <div class="protocol-item"><div><strong>客观零退化</strong><br>测试、引用、约束满足等通过率不得低于当前 Helm；新增关键失败直接否决。</div></div>
         <div class="protocol-item"><div><strong>分层检查</strong><br>首次分类错误与 Capability Drift 分开报告；任何一层退化都不能被总体平均掩盖。</div></div>
         <div class="protocol-item"><div><strong>节省目标</strong><br>候选平均总费用必须同时不高于当前 Helm 和始终强模型的 80%；包含 cache read/write、预热和分类。</div></div>
-        <div class="protocol-item"><div><strong>最终判定</strong><br>质量硬底线、客观检查、20% 节省和 p95 延迟护栏全部通过才采用。</div></div>
+        <div class="protocol-item"><div><strong>最终判定</strong><br>没有检测到显著质量退化、客观检查不下降、20% 节省和 p95 延迟护栏全部通过才采用。</div></div>
       </div>
     </div>
   </section>
@@ -280,9 +280,9 @@ const Protocol = (() => {
     });
     const modes = [initial, drift];
     const coveragePass = modes.every((m) => m.decisive >= state.thresholds.minDecisivePerMode);
-    const strictQualityFloorPass = total.low >= 0.5;
-    const modeObservedNoLoss = modes.every((m) => m.decisive > 0 && m.estimate >= 0.5);
+    const significantOverallHarm = total.decisive > 0 && total.high < 0.5;
     const significantModeHarm = modes.some((m) => m.decisive > 0 && m.high < 0.5);
+    const noDetectedQualityRegression = !significantOverallHarm && !significantModeHarm;
 
     const objectiveBaselineRate = state.objective.total ? state.objective.baselinePasses / state.objective.total : 0;
     const objectiveCandidateRate = state.objective.total ? state.objective.candidatePasses / state.objective.total : 0;
@@ -302,20 +302,18 @@ const Protocol = (() => {
     let title = "等待完整证据";
     let reason = "依次加入盲评、客观检查和经济数据。";
     if (complete) {
-      if (state.objective.criticalRegressions > 0 || significantModeHarm || !modeObservedNoLoss || !objectivePass) {
+      if (state.objective.criticalRegressions > 0 || significantOverallHarm || significantModeHarm || !objectivePass) {
         status = "reject";
         title = "否决候选方案";
         reason = state.objective.criticalRegressions > 0
           ? "出现新增关键客观失败。"
-          : significantModeHarm || !modeObservedNoLoss
-            ? "首次误判或 Capability Drift 分层出现质量下降。"
+          : significantOverallHarm || significantModeHarm
+            ? "总体或某个失效模式检测到统计显著的质量退化。"
             : "客观检查通过率低于当前 Helm。";
-      } else if (!coveragePass || !strictQualityFloorPass) {
+      } else if (!coveragePass) {
         status = "inconclusive";
-        title = "质量零退化证据不足";
-        reason = !coveragePass
-          ? "首次误判或 Capability Drift 的决定性样本不足。"
-          : "候选胜率的 95% 区间下界仍低于 50%；有限样本无法证明质量完全不降。";
+        title = "质量证据不足";
+        reason = "首次误判或 Capability Drift 的决定性样本不足。";
       } else if (!currentSavingsPass || !strongSavingsPass || !latencyPass) {
         status = "hold";
         title = "质量达标，但节省目标失败";
@@ -328,14 +326,14 @@ const Protocol = (() => {
       } else {
         status = "adopt";
         title = "采用候选方案";
-        reason = "质量零退化证据通过，两个失效模式无下降，且相对双基线均至少节省 20%。";
+        reason = "未检测到显著质量退化，客观检查不下降，且相对双成本基线均至少节省 20%。";
       }
     }
 
     return {
       status, title, reason, complete,
       modes: { initial, drift, total },
-      gates: { coveragePass, strictQualityFloorPass, modeObservedNoLoss, significantModeHarm, objectivePass, currentSavingsPass, strongSavingsPass, latencyPass },
+      gates: { coveragePass, noDetectedQualityRegression, significantOverallHarm, significantModeHarm, objectivePass, currentSavingsPass, strongSavingsPass, latencyPass },
       objective: { baselineRate: objectiveBaselineRate, candidateRate: objectiveCandidateRate },
       economics: { candidateToCurrentCostRatio, candidateToStrongCostRatio, latencyRatio },
     };
@@ -446,11 +444,11 @@ const scenarios = [
   },
   {
     id: "ties",
-    name: "质量证据不足",
-    description: "大量平局导致区间过宽；虽然已经省钱，但还不能证明质量完全不降。",
+    name: "小幅下降未被检出",
+    description: "候选观察胜率略低于 50%，但区间仍包含持平；按照“没发现退化即可”规则仍会采用。",
     preset: {
-      evidence: { initial: { wins: 10, losses: 5, ties: 35 }, drift: { wins: 5, losses: 3, ties: 22 } },
-      objective: { total: 80, baselinePasses: 74, candidatePasses: 74, criticalRegressions: 0 },
+      evidence: { initial: { wins: 22, losses: 23, ties: 5 }, drift: { wins: 20, losses: 22, ties: 8 } },
+      objective: { total: 100, baselinePasses: 95, candidatePasses: 95, criticalRegressions: 0 },
       economics: { currentHelmAvgCost: 1, strongModelAvgCost: 1.8, candidateAvgCost: 0.7, currentHelmP95: 10, candidateP95: 10.4 },
     },
   },
@@ -490,7 +488,7 @@ function render() {
       <p>${result.reason}</p>
       <div class="gate-list">
         ${gate("盲评与两个失效模式覆盖完整", result.gates.coveragePass, !state.loaded.quality)}
-        ${gate("质量硬底线：总体 95% 区间下界 ≥ 50%", result.gates.strictQualityFloorPass, !state.loaded.quality)}
+        ${gate("总体与分层均未检测到显著质量退化", result.gates.noDetectedQualityRegression, !state.loaded.quality)}
         ${gate("客观检查不低于当前 Helm 且无关键回退", result.gates.objectivePass, !state.loaded.objective)}
         ${gate("相对当前 Helm 平均总费用至少节省 20%", result.gates.currentSavingsPass, !state.loaded.economics)}
         ${gate("相对始终强模型平均总费用至少节省 20%", result.gates.strongSavingsPass, !state.loaded.economics)}

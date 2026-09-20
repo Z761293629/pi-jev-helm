@@ -62,7 +62,7 @@ const pad = (value, width) => String(value).padEnd(width);
 const pct = (n) => `${(n * 100).toFixed(1)}%`;
 
 console.log("路由评测协议 · 终端评审");
-console.log("目标：质量零退化，同时相对当前 Helm 和始终强模型至少节省 20%。\n");
+console.log("目标：未检测到显著质量退化，同时相对当前 Helm 和始终强模型至少节省 20%。\n");
 
 console.log(
   `${pad("场景", 22)}${pad("首次误判", 16)}${pad("能力漂移", 16)}${pad("总体胜率 95%CI", 22)}${pad("/Helm", 8)}${pad("/强模", 8)}${pad("p95", 8)}判定`,

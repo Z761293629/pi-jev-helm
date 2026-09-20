@@ -5,15 +5,16 @@ routing strategy without reducing task-result quality**, when initial
 misclassification, Capability Drift, and Prompt Cache loss all affect the result?
 
 The current decision target is cost-first: at least 20% lower average total cost
-than both current Helm and the always-strong-model control, with zero quality
-regression and no new critical objective failure.
+than both current Helm and the always-strong-model control, with no statistically
+detected quality regression and no new critical objective failure. This rule can
+miss small degradations; the prototype includes that case explicitly.
 
 Two review surfaces over the same logic:
 
 - **`index.html`** — self-contained, double-clickable. Open it on a machine with
   a browser. Free-play buttons plus five guided scenarios (cost target met,
-  cache loss erasing savings, aggregate parity hiding Drift harm, insufficient
-  quality evidence, objective regression).
+  cache loss erasing savings, aggregate parity hiding Drift harm, a small decline
+  that is not statistically detected, and objective regression).
 - **`review.mjs`** — terminal reviewer for SSH sessions. Extracts the same
   protocol logic and scenario presets from `index.html`, so there is one source
   of truth.
