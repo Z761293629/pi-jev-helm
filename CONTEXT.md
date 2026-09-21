@@ -81,8 +81,12 @@ A structured, user-visible account of how a Routed Run selected or retained its 
 _Avoid_: Chain of thought, Jev rationale
 
 **Routed Run**:
-A routing scope that begins when a user message starts work from Pi's idle state and ends after all of that work's turns and queued continuations settle; every turn in the scope shares one Route.
+A routing scope that begins when a user message starts work from Pi's idle state and ends after all of that work's turns and queued continuations settle; every turn in the scope shares one Route unless an evidence-gated Capability Drift upgrade applies.
 _Avoid_: Idle prompt, single-message route
+
+**Capability Drift**:
+Event-derived evidence during an active Routed Run that its cumulative task requirements now contain Capability Signals not represented by its earlier Task Classification, making a strictly higher transition in a predeclared Route escalation graph eligible for rejudgment. Tool activity or failure alone is only a trigger candidate, not proof of drift.
+_Avoid_: Per-turn routing, automatic downgrade, model-performance failure
 
 **Baseline Model**:
 The Pi model and thinking level selected before a Routed Run. They are restored after it settles unless an Explicit Model Override supersedes them.
