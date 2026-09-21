@@ -81,6 +81,13 @@ function cmdSelect() {
 }
 
 // ---------- run ----------
+const ROUTE_TARGETS = {
+  fast: ['deepseek', 'deepseek-flash', 'high'],
+  coding: ['openai-codex', 'gpt-5.6-sol', 'high'],
+  reasoning: ['openai-codex', 'gpt-6-astra', 'high'],
+  research: ['zai-coding-cn', 'glm-5.3-flash', 'high'],
+};
+
 function runOne(r, arm) {
   const s = loadSample(r.id);
   const sessDir = path.join(runsDir, arm);
@@ -88,6 +95,12 @@ function runOne(r, arm) {
   const args = ['-p', '--mode', 'json', '--session-dir', sessDir,
     '--name', `bl-${arm}-${r.id}`, s.text];
   if (arm === 'strong') args.push('--provider', 'openai-codex', '--model', 'gpt-6-astra', '--thinking', 'high');
+  if (arm === 'oracle') {
+    const labels = JSON.parse(fs.readFileSync(path.join(runsDir, 'oracle-labels.json'), 'utf8'));
+    const t = ROUTE_TARGETS[labels[r.id]?.route];
+    if (!t) { return Promise.resolve({ id: r.id, arm, wallMs: 0, exit: 1, error: 'no oracle label' }); }
+    args.push('--provider', t[0], '--model', t[1], '--thinking', t[2]);
+  }
   const t0 = Date.now();
   return new Promise((resolve) => {
     // stdin MUST be ignored: headless pi waits for stdin EOF when not a TTY.
@@ -121,9 +134,9 @@ async function cmdRun(planPath, armFilter) {
   const results = [];
   for (const arm of phases) {
     let restore = null;
-    if (arm === 'strong') {
-      restore = setAutomaticRouting(false); // strong arm must not be re-routed
-      console.log('automaticRouting → OFF for strong arm');
+    if (arm !== 'helm') {
+      restore = setAutomaticRouting(false); // non-helm arms must not be re-routed
+      console.log(`automaticRouting → OFF for ${arm} arm`);
     }
     const jobs = plan.runs.map((r) => ({ r, arm }));
     const CONC = 3;
@@ -191,7 +204,7 @@ function cmdAnalyze() {
   const reportPath = path.join(runsDir, 'baseline-results.jsonl');
   fs.writeFileSync(reportPath, out.map((r) => JSON.stringify(r)).join('\n') + '\n');
   // console summary
-  for (const arm of ['helm', 'strong']) {
+  for (const arm of ['helm', 'strong', 'oracle']) {
     const rs = out.filter((r) => r.arm === arm && !r.missing);
     if (!rs.length) continue;
     const cost = rs.reduce((a, r) => a + r.usage.cost, 0);
