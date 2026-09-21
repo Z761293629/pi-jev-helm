@@ -72,6 +72,10 @@ _Avoid_: Route, default model
 The optional Helm behavior that classifies a new Routed Run and applies Routing Policy when no Route Override is pending. Disabling it leaves explicit Route Overrides available.
 _Avoid_: Extension enabled, mandatory routing
 
+**Fail-open**:
+The Routing Policy outcome when a required Capability Signal's confidence is too low to route: no Route is applied and the Routed Run continues on the Baseline Model while the Task Classification is still recorded. Fail-open is the policy's floor; it is not a Route Target.
+_Avoid_: Fallback tier, floor tier, default model
+
 **Route Override**:
 A one-shot user selection of the Route for the next Routed Run. It bypasses Task Classification but still resolves through that Route's configured Route Target.
 _Avoid_: Model override, persistent route
